@@ -61,10 +61,16 @@ from backtest.cash_interest import (
 from backtest.policies.earnings_surprise import M10_7_EARNINGS_SURPRISE
 from backtest.policies.momentum_v2 import (
     D13_DAILY_SLOT_FILL,
+    D13_EARLY_BREADTH_TURN,
+    D13_EARLY_CONFIRMED_CROSS,
+    D13_EARLY_MOMENTUM_TURN,
+    D13_EARLY_SCALE_IN,
     D13_PER_STOCK_CLOCK,
     D13_PER_STOCK_DAILY_GATE,
     D13_PER_STOCK_DAILY_PARK,
     D13_PER_STOCK_NO_REGIME,
+    D13_RANK_ORDERED_BUYS,
+    D13_SECTOR_REFILL,
     PAPER_RATIFIED_2026_09_06,
     MomentumV2Parameters,
 )
@@ -116,6 +122,7 @@ __all__ = [
     "BAND_HIT_ARM",
     "D13_PAPER_BASELINE",
     "DURATION_ARMS",
+    "EARLY_ENTRY_ARMS",
     "EARNINGS_SURPRISE_ARM",
     "H1_RESIDUAL_MOMENTUM",
     "H2_BAND_HIT_AVOIDANCE",
@@ -127,6 +134,7 @@ __all__ = [
     "REGIME_DAILY_ARMS",
     "REGIME_LENGTH_ARMS",
     "RETIRED_ARMS",
+    "SECTOR_ORDER_ARMS",
     "SWING_REDEPLOY",
     "SWING_REGIME_REDEPLOY",
     "Arm",
@@ -349,6 +357,74 @@ REGIME_LENGTH_ARMS: tuple[Arm, ...] = (
         reference=D13_PAPER_BASELINE.label,
         note="the monthly regime gate reads NIFTY 50 TRI against its 50-session average, not 200",
         v2=replace(PAPER_RATIFIED_2026_09_06, regime_ma_days=50),
+    ),
+)
+
+#: M14.9: D13 with one pre-registered early re-entry trigger for a parked book
+#: (``backtest.policies.early_entry``; ops/studies/preregistration-m14-9-momentum-turn-entry-
+#: 2026-11-05.md). Exits stay D13's monthly rule. Research arms only — kept out of ``ARMS`` for the
+#: reason D13 is.
+EARLY_V1 = "V1 confirmed cross (5 sessions >= MA200)"
+EARLY_V2 = "V2 momentum turn (MA50 rising, 20d return > 0, >= 0.98 MA200)"
+EARLY_V3 = "V3 scale-in (half at first close >= MA200)"
+EARLY_V4 = "V4 breadth turn (>= 50% above own MA200, rising over 20d)"
+EARLY_ENTRY_ARMS: tuple[Arm, ...] = (
+    Arm(
+        label=EARLY_V1,
+        family="early entry (M14.9)",
+        reference=D13_PAPER_BASELINE.label,
+        note="a parked book re-enters after the NIFTY 50 TRI has closed at or above its 200d MA "
+        "on 5 consecutive sessions; exits monthly, as D13",
+        v2=D13_EARLY_CONFIRMED_CROSS,
+    ),
+    Arm(
+        label=EARLY_V2,
+        family="early entry (M14.9)",
+        reference=D13_PAPER_BASELINE.label,
+        note="a parked book re-enters when the TRI is >= 0.98 x its 200d MA, its 50d MA is above "
+        "its value 10 sessions earlier and its 20-session return is positive; exits monthly",
+        v2=D13_EARLY_MOMENTUM_TURN,
+    ),
+    Arm(
+        label=EARLY_V3,
+        family="early entry (M14.9)",
+        reference=D13_PAPER_BASELINE.label,
+        note="the first close at or above the 200d MA deploys half the basket; the next monthly "
+        "rebalance completes it if risk-on, else parks again",
+        v2=D13_EARLY_SCALE_IN,
+    ),
+    Arm(
+        label=EARLY_V4,
+        family="early entry (M14.9)",
+        reference=D13_PAPER_BASELINE.label,
+        note="a parked book re-enters when >= 50% of the PIT universe closes above its own 200d "
+        "MA and that share is higher than 20 sessions earlier; exits monthly",
+        v2=D13_EARLY_BREADTH_TURN,
+    ),
+)
+
+#: M14.9 arm S (owner, 2026-11-05): D13 with its buys submitted to A8's rails in momentum-rank
+#: order, so the 35% sector cap refuses the lowest-ranked names of a crowded sector; S+refill also
+#: replaces a name the cap would refuse with the next-ranked name outside that sector. The rails
+#: are untouched. Research arms only — kept out of ``ARMS`` for the reason D13 is.
+SECTOR_S = "S rank-ordered buys under the sector cap"
+SECTOR_S_REFILL = "S+refill: capped names replaced by the next-ranked outside the sector"
+SECTOR_ORDER_ARMS: tuple[Arm, ...] = (
+    Arm(
+        label=SECTOR_S,
+        family="sector-cap order (M14.9)",
+        reference=D13_PAPER_BASELINE.label,
+        note="buys reach the rail gate best-ranked first, so the 35% sector cap refuses the "
+        "lowest-ranked names in a capped sector; nothing else changed",
+        v2=D13_RANK_ORDERED_BUYS,
+    ),
+    Arm(
+        label=SECTOR_S_REFILL,
+        family="sector-cap order (M14.9)",
+        reference=SECTOR_S,
+        note="as S, and a basket name the cap would refuse is replaced by the next-ranked name "
+        "outside the capped sector, up to 20 names",
+        v2=D13_SECTOR_REFILL,
     ),
 )
 

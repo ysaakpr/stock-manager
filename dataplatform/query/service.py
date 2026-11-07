@@ -238,6 +238,31 @@ class QueryService:
         )
         return CrossSection(trade_date=request.trade_date, rows=rows)
 
+    def adjusted_closes_between(
+        self, start: date, end: date
+    ) -> dict[date, dict[str, dict[Exchange, Decimal]]]:
+        """Every L2 adjusted close dated in ``[start, end]``: session → ISIN → venue → close.
+
+        The bars :meth:`cross_section` reads for each of those sessions, in one query instead of
+        one per session, with the same D22 quarantine applied — but **not** deduped: the venue is
+        kept so a caller that pins a primary (as the backtest's adjusted close source does) can
+        apply the same choice. For a research pass over many sessions (M14.9 breadth) where one
+        cross-section per session costs a scan of every L2 partition. Never derives a primary.
+        """
+        rows = self._con.execute(
+            f"SELECT isin, exchange, trade_date, adj_close FROM {_ADJUSTED_VIEW} "
+            f"WHERE trade_date BETWEEN $start AND $end",
+            {"start": start, "end": end},
+        ).fetchall()
+        out: dict[date, dict[str, dict[Exchange, Decimal]]] = {}
+        for isin, exchange, trade_date, adj_close in rows:
+            if not self._quarantine.admits(str(isin), trade_date):
+                continue
+            out.setdefault(trade_date, {}).setdefault(str(isin), {})[_exchange(str(exchange))] = (
+                Decimal(adj_close)
+            )
+        return out
+
     # ── shape (c): screen-style filters over a joined cross-section ─────────────────────────────
 
     def screen(

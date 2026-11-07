@@ -76,6 +76,22 @@ a documented *v2* — four independent, a-priori improvements, **each behind its
   ``daily_regime_park`` makes a risk-off session park the whole book as well. Off by default and
   absent from the parameters' ``repr`` while off, so D13's fingerprint is unchanged.
 
+* **Early re-entry** (``early_entry``) — M14.9, research variants on D13 asking whether a parked
+  book should come back before the next monthly rebalance when the trend *turns*, not only when the
+  index crosses its average (:mod:`backtest.policies.early_entry`): a confirmed cross, a momentum
+  turn, a half-size scale-in, or a breadth turn. Read only while the book is parked and only off a
+  rebalance session; a re-entry is a full rebalance on that session (at half exposure for the
+  scale-in), and exits stay the monthly rule. Off by default and out of ``repr`` while off.
+
+* **Rank-ordered buys and sector refill** (``rank_ordered_buys``, ``sector_refill``) — M14.9
+  arm S, research variants on D13. A8's 35 % sector rail clears a session's buys one by one in
+  the order the policy submits them, so which name in a crowded sector it refuses depends on that
+  order, not on momentum. ``rank_ordered_buys`` submits the buys best-ranked first, so the cap
+  refuses the *lowest*-ranked names of a sector. ``sector_refill`` goes further, policy-side: a
+  basket name whose buy would take its sector past the cap is replaced by the next-ranked name
+  outside the capped sector, up to ``top_n``, so the slot's cash is not left idle. The rails and
+  their limits are untouched. Off by default and out of ``repr`` while off.
+
 With **all six toggles off** the policy reproduces the naive top-N decision exactly — that is the
 "naive" baseline the increment report is struck against, and a unit test pins the parity. Every knob
 is a stated parameter, echoed verbatim into the report, so nothing here is silently tuned.
@@ -92,7 +108,7 @@ or reach data outside the point-in-time context. Given the same inputs it return
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field, fields, replace
 from datetime import date
 from decimal import ROUND_CEILING, Decimal
@@ -101,6 +117,16 @@ from typing import Final, Protocol, runtime_checkable
 from analyst.cases import RiskRails
 from analyst.journal.evidence import EvidenceBundle, EvidenceItem, EvidenceKind
 from analyst.journal.models import Actor, Decision, JournalEntry, Sleeve
+from analyst.rails import Lot, Portfolio, ProposedOrder, RailId, apply_order, check_order
+from backtest.policies.early_entry import (
+    SCALE_IN_FRACTION,
+    BreadthData,
+    EarlyEntry,
+    RegimeTrendData,
+    breadth_turn,
+    confirmed_cross,
+    momentum_turn,
+)
 from backtest.policies.industry_gate import apply_industry_gate
 from backtest.policies.momentum_v2_overlays import (
     AbsoluteMomentumData,
@@ -120,13 +146,19 @@ from execution.broker import Exchange, Holding, OrderRequest, Position, Side
 __all__ = [
     "D13_ABS_MOM",
     "D13_DAILY_SLOT_FILL",
+    "D13_EARLY_BREADTH_TURN",
+    "D13_EARLY_CONFIRMED_CROSS",
+    "D13_EARLY_MOMENTUM_TURN",
+    "D13_EARLY_SCALE_IN",
     "D13_INDUSTRY_GATE",
     "D13_PER_STOCK_CLOCK",
     "D13_PER_STOCK_DAILY_GATE",
     "D13_PER_STOCK_DAILY_PARK",
     "D13_PER_STOCK_NO_REGIME",
     "D13_PROFIT_FILTER",
+    "D13_RANK_ORDERED_BUYS",
     "D13_RESID_MOM",
+    "D13_SECTOR_REFILL",
     "PAPER_RATIFIED_2026_09_06",
     "PER_STOCK_REVIEW_SESSIONS",
     "MomentumV2Data",
@@ -270,6 +302,17 @@ class MomentumV2Parameters:
       daily regime switches need ``review_sessions`` and ``regime_filter``. Defined on D13's own
       toggles only: none combines with the M14.5 daily regime checks, the vol target or an M16
       overlay. Off by default and out of ``repr`` while off.
+    * ``rank_ordered_buys`` / ``sector_refill`` — M14.9 arm S: submit a session's buys in
+      momentum-rank order (best first), and (refill, which needs it) replace a basket name the
+      35 % sector rail would refuse with the next-ranked name outside its sector. The refill needs
+      the rails' sector map and caps, handed to the policy (``sector_of``, ``order_caps``). Never
+      combined with an early-entry trigger, the M14.5/M14.6 switches, the vol target or A1. Off by
+      default and out of ``repr`` while off.
+    * ``early_entry`` — M14.9: which pre-registered trigger may re-enter a parked book off a
+      rebalance session (:class:`~backtest.policies.early_entry.EarlyEntry`), or ``None`` (D13).
+      Requires ``regime_filter``; defined on D13's own toggles, so it never combines with the
+      M14.5 daily regime checks, the M14.6 per-stock switches or the vol target. Off by default
+      and out of ``repr`` while off.
 
     With ``use_12_1``, ``sell_band``, ``regime_filter``, ``vol_scaled``, ``redeploy_next_session``
     and ``vol_target_annual`` all off/``None`` the policy is the naive top-N policy exactly. Every
@@ -300,6 +343,9 @@ class MomentumV2Parameters:
     review_sessions: int | None = field(default=None, repr=False)
     daily_regime_gate: bool = field(default=False, repr=False)
     daily_regime_park: bool = field(default=False, repr=False)
+    early_entry: EarlyEntry | None = field(default=None, repr=False)
+    rank_ordered_buys: bool = field(default=False, repr=False)
+    sector_refill: bool = field(default=False, repr=False)
 
     def __post_init__(self) -> None:
         if self.top_n <= 0:
@@ -340,6 +386,54 @@ class MomentumV2Parameters:
         if self.regime_daily_band != _ZERO and not daily:
             raise ValueError("regime_daily_band applies only to a daily regime check")
         self._check_per_stock()
+        self._check_early_entry()
+        self._check_sector_order()
+
+    def _check_sector_order(self) -> None:
+        """M14.9 arm S: rank-ordered buys and the refill are D13's own toggles plus this one."""
+        if self.sector_refill and not self.rank_ordered_buys:
+            raise ValueError("sector_refill extends rank_ordered_buys; turn it on")
+        if not self.rank_ordered_buys:
+            return
+        clashing = [
+            name
+            for name in (
+                "regime_daily_reentry",
+                "regime_daily_exit",
+                "daily_slot_fill",
+                "absolute_momentum",
+            )
+            if getattr(self, name)
+        ]
+        if self.early_entry is not None:
+            clashing.append("early_entry")
+        if self.vol_target_annual is not None:
+            clashing.append("vol_target_annual")
+        if clashing:
+            raise ValueError(
+                f"the sector-order arms are defined on D13's own toggles; turn off "
+                f"{', '.join(clashing)}"
+            )
+
+    def _check_early_entry(self) -> None:
+        """M14.9: an early-entry trigger extends D13's regime filter and nothing else."""
+        if self.early_entry is None:
+            return
+        if not isinstance(self.early_entry, EarlyEntry):
+            raise TypeError("early_entry must be an EarlyEntry")
+        if not self.regime_filter:
+            raise ValueError("early_entry re-enters a regime-parked book; turn on regime_filter")
+        clashing = [
+            name
+            for name in ("regime_daily_reentry", "regime_daily_exit", "daily_slot_fill")
+            if getattr(self, name)
+        ]
+        if self.vol_target_annual is not None:
+            clashing.append("vol_target_annual")
+        if clashing:
+            raise ValueError(
+                f"early_entry is defined on D13's own toggles; turn off {', '.join(clashing)}"
+            )
 
     def _check_per_stock(self) -> None:
         """M14.6: the per-stock switches' own dependencies, and what they never combine with."""
@@ -446,6 +540,24 @@ D13_PER_STOCK_DAILY_PARK: Final = replace(D13_PER_STOCK_DAILY_GATE, daily_regime
 #: V4 — V2 with no regime filter at all.
 D13_PER_STOCK_NO_REGIME: Final = replace(D13_PER_STOCK_CLOCK, regime_filter=False)
 
+#: M14.9's early-entry variants on D13 — research configurations only; paper trading runs D13.
+#: Each is D13 with one pre-registered trigger (:mod:`backtest.policies.early_entry`).
+D13_EARLY_CONFIRMED_CROSS: Final = replace(
+    PAPER_RATIFIED_2026_09_06, early_entry=EarlyEntry.CONFIRMED_CROSS
+)
+D13_EARLY_MOMENTUM_TURN: Final = replace(
+    PAPER_RATIFIED_2026_09_06, early_entry=EarlyEntry.MOMENTUM_TURN
+)
+D13_EARLY_SCALE_IN: Final = replace(PAPER_RATIFIED_2026_09_06, early_entry=EarlyEntry.SCALE_IN)
+D13_EARLY_BREADTH_TURN: Final = replace(
+    PAPER_RATIFIED_2026_09_06, early_entry=EarlyEntry.BREADTH_TURN
+)
+
+#: M14.9 arm S: D13 with its buys submitted to the rails in momentum-rank order; S+refill also
+#: replaces a name the sector cap would refuse. Research configurations only.
+D13_RANK_ORDERED_BUYS: Final = replace(PAPER_RATIFIED_2026_09_06, rank_ordered_buys=True)
+D13_SECTOR_REFILL: Final = replace(D13_RANK_ORDERED_BUYS, sector_refill=True)
+
 
 @runtime_checkable
 class MomentumV2Data(Protocol):
@@ -500,6 +612,8 @@ class MomentumV2Policy:
         "_params",
         "_parked",
         "_pending",
+        "_rank_of",
+        "_sector_of",
         "_session_count",
     )
 
@@ -509,9 +623,17 @@ class MomentumV2Policy:
         params: MomentumV2Parameters | None = None,
         *,
         order_caps: RiskRails | None = None,
+        sector_of: Callable[[str], str] | None = None,
     ) -> None:
         self._data = data
         self._params = params if params is not None else MomentumV2Parameters()
+        # M14.9 arm S: the refill reads the rails' own sector map and cap, never its own copy.
+        self._sector_of = sector_of
+        if self._params.sector_refill and (sector_of is None or order_caps is None):
+            raise TypeError("sector_refill needs the rails' sector map (sector_of) and order_caps")
+        #: The momentum rank of every candidate at the last rebalance (rank_ordered_buys only),
+        #: so the next-session redeploy submits its buys in the same order.
+        self._rank_of: dict[str, int] = {}
         # M16.1: an overlay switched on against a source with no method for it is refused here,
         # not on the first rebalance a month into a run. The check is runtime_checkable's, so it
         # sees only that the method exists: the L1 source always has all three and raises
@@ -525,6 +647,18 @@ class MomentumV2Policy:
                 raise TypeError(
                     f"{switch} is on but the data source does not serve {seam.__name__}"
                 )
+        # M14.9: the trend triggers read the regime index's trend, the breadth trigger the
+        # universe's breadth; the scale-in reads only the ordinary regime reading.
+        early = self._params.early_entry
+        early_seam: type | None = None
+        if early in (EarlyEntry.CONFIRMED_CROSS, EarlyEntry.MOMENTUM_TURN):
+            early_seam = RegimeTrendData
+        elif early is EarlyEntry.BREADTH_TURN:
+            early_seam = BreadthData
+        if early_seam is not None and not isinstance(data, early_seam):
+            raise TypeError(
+                f"early_entry={early} but the data source does not serve {early_seam.__name__}"
+            )
         # The rails A8 will clear this policy's orders against. With them, no buy is sized past the
         # per-order ceiling (``backtest.policies.sizing.account_order_ceiling``): a buy the rail is
         # bound to refuse leaves its cash idle, the next rebalance spreads the larger idle balance
@@ -610,6 +744,10 @@ class MomentumV2Policy:
             daily = self._daily_regime(ctx)
             if daily is not None:
                 return daily
+        if self._params.early_entry is not None and self._parked:
+            early = self._early_entry(ctx)
+            if early is not None:
+                return early
         if self._pending is not None:
             pending, self._pending = self._pending, None
             return self._redeploy(ctx, pending)
@@ -637,6 +775,156 @@ class MomentumV2Policy:
             self._pending = None  # nothing is redeployed into a basket being parked
             return self._park(ctx, reading)
         return None
+
+    def _early_entry(self, ctx: SessionContext) -> SessionDecision | None:
+        """M14.9: a parked book's pre-registered early trigger, read off a rebalance session.
+
+        Returns the re-entry rebalance when the trigger fires, else ``None`` (the session falls
+        through to D13's heartbeat). The reading is admitted through the PIT guard. A re-entry
+        clears :attr:`parked`, so a parked spell re-enters at most once; the next risk-off
+        rebalance parks the book again exactly as D13 does.
+        """
+        mode = self._params.early_entry
+        cap = _ONE
+        item: EvidenceItem
+        if mode is EarlyEntry.BREADTH_TURN:
+            assert isinstance(self._data, BreadthData)
+            (breadth,) = ctx.pit.admit(self._data.breadth(ctx.session))
+            if not breadth_turn(breadth):
+                return None
+            item = EvidenceItem(
+                kind=EvidenceKind.PRICE,
+                source="L2",
+                label="early_entry_breadth_turn",
+                as_of=ctx.session,
+                value=breadth.share_above,
+                detail={
+                    "share_above_lagged": str(breadth.share_above_lagged),
+                    "names_counted": str(breadth.names_counted),
+                },
+                text="M14.9 breadth turn: a parked book re-enters before the monthly rebalance",
+            )
+        elif mode is EarlyEntry.SCALE_IN:
+            (reading,) = ctx.pit.admit(self._data.regime(ctx.session))
+            if not reading.risk_on:
+                return None
+            cap = SCALE_IN_FRACTION
+            item = EvidenceItem(
+                kind=EvidenceKind.PRICE,
+                source="benchmark",
+                label="early_entry_scale_in",
+                as_of=ctx.session,
+                value=reading.index_level,
+                detail={"moving_average": str(reading.moving_average), "exposure": str(cap)},
+                text="M14.9 scale-in: the first close at or above the MA deploys half the basket",
+            )
+        else:
+            assert isinstance(self._data, RegimeTrendData)
+            (trend,) = ctx.pit.admit(self._data.regime_trend(ctx.session))
+            fires = confirmed_cross if mode is EarlyEntry.CONFIRMED_CROSS else momentum_turn
+            if not fires(trend):
+                return None
+            item = EvidenceItem(
+                kind=EvidenceKind.PRICE,
+                source="benchmark",
+                label=f"early_entry_{mode}",
+                as_of=ctx.session,
+                value=trend.index_level,
+                detail={
+                    "moving_average": str(trend.moving_average),
+                    "sessions_at_or_above": str(trend.sessions_at_or_above),
+                    "short_average": str(trend.short_average),
+                    "short_average_lagged": str(trend.short_average_lagged),
+                    "level_lagged": str(trend.level_lagged),
+                },
+                text=f"M14.9 {mode}: a parked book re-enters before the monthly rebalance",
+            )
+        return self._rebalance(ctx, early=item, exposure_cap=cap)
+
+    # ── M14.9 arm S: rank-ordered buys and the sector refill ──────────────────────────────────
+
+    def _in_rank_order(
+        self, buys: list[tuple[OrderRequest, str]]
+    ) -> list[tuple[OrderRequest, str]]:
+        """The buys best-ranked first (rank at the last rebalance; unranked last, by ISIN)."""
+        unranked = len(self._rank_of)
+        return sorted(buys, key=lambda buy: (self._rank_of.get(buy[0].isin, unranked), buy[0].isin))
+
+    def _sector_refill(
+        self, ctx: SessionContext, ranked: Sequence[MomentumV2Record], keep: set[str]
+    ) -> list[MomentumV2Record]:
+        """The basket with every name A8's sector rail would refuse replaced, best-ranked first.
+
+        Asks A8 itself (:func:`analyst.rails.check_order` on a projected book), never compares a
+        cap here: the book is the held names the rebalance keeps, at their prices, plus the rest of
+        the capital in cash; each basket name in rank order is proposed as a whole-share top-up to
+        its model weight of capital and applied with :func:`analyst.rails.apply_order`. The first
+        name whose top-up A8 would refuse under ``MAX_SECTOR`` is dropped and the basket re-formed
+        from the next-ranked eligible names, until A8 refuses none (each pass drops one name, so it
+        ends). Only the sector verdict decides; any other rail is left to the gate as for every
+        order. A held name outside the sell band is sold by this rebalance and is not eligible
+        (the 2026-11-05 crash: one ISIN sold and bought in one session). A projection only: the
+        gate still clears every order, and a buy it refuses anyway stays refused.
+        """
+        assert self._sector_of is not None and self._order_caps is not None
+        sector_of = self._sector_of
+        held = {holding.isin: holding for holding in ctx.broker.holdings()}
+        price_of = {record.isin: record.price for record in ranked}
+        kept = tuple(
+            Lot(
+                isin=isin,
+                sector=sector_of(isin),
+                quantity=h.quantity,
+                price=price_of.get(isin, h.average_price),
+            )
+            for isin, h in sorted(held.items())
+            if isin in keep and h.quantity > 0
+        )
+        capital = self._capital(ctx, held, price_of, ranked)
+        cash = capital - sum((lot.value for lot in kept), _ZERO)
+        book = Portfolio(case_id="momentum-v2-refill", lots=kept, cash=max(_ZERO, cash))
+        excluded: set[str] = {isin for isin in held if isin not in keep}
+        while True:
+            basket = [r for r in ranked if r.isin not in excluded][: self._params.top_n]
+            weights = self._weights_for({r.isin: r for r in basket})
+            projected = book
+            refused: str | None = None
+            for record in basket:
+                lot = projected.lot(record.isin)
+                already = _ZERO if lot is None else lot.value
+                add = weights[record.isin] * capital - already
+                quantity = min(int(add // record.price), int(projected.cash // record.price))
+                if quantity <= 0:
+                    continue
+                order = ProposedOrder(
+                    request=OrderRequest(
+                        isin=record.isin, side=Side.BUY, quantity=quantity, tag="MOMENTUM"
+                    ),
+                    price=record.price,
+                    sector=sector_of(record.isin),
+                )
+                verdict = check_order(order, projected, self._order_caps)
+                if any(b.rail is RailId.MAX_SECTOR for b in verdict.breaches):
+                    refused = record.isin
+                    break
+                projected = apply_order(projected, order)
+            if refused is None:
+                return basket
+            # Pre-registration §8: the replacement is the next-ranked name *outside the capped
+            # sector*. So the refused name and every lower-ranked name of its sector leave the
+            # candidates; better-ranked names of that sector already accepted stay. A refused name
+            # is replaced, never just dropped: with fewer eligible names left than the basket
+            # holds, the refill stops and leaves this basket to the gate, as S would (dropping it
+            # would shrink the basket and inflate every remaining weight).
+            capped = sector_of(refused)
+            position = next(i for i, r in enumerate(ranked) if r.isin == refused)
+            dropped = {refused} | {
+                r.isin for r in ranked[position + 1 :] if sector_of(r.isin) == capped
+            }
+            remaining = sum(1 for r in ranked if r.isin not in excluded and r.isin not in dropped)
+            if remaining < len(basket):
+                return basket
+            excluded |= dropped
 
     # ── M14.6: per-stock entry and review ────────────────────────────────────────────────────────
 
@@ -909,13 +1197,25 @@ class MomentumV2Policy:
         )
         return SessionDecision(evidence=evidence)
 
-    def _rebalance(self, ctx: SessionContext) -> SessionDecision:
-        """Rank the admitted candidates, apply the toggled overlays, and stage the orders."""
+    def _rebalance(
+        self,
+        ctx: SessionContext,
+        *,
+        early: EvidenceItem | None = None,
+        exposure_cap: Decimal = _ONE,
+    ) -> SessionDecision:
+        """Rank the admitted candidates, apply the toggled overlays, and stage the orders.
+
+        ``early`` is an M14.9 trigger's reading: the trigger has already decided to re-enter, so
+        the regime is not re-read (the momentum and breadth turns may fire below the MA by
+        design), and the reading is filed with the decision. ``exposure_cap`` below one (the
+        scale-in) caps the basket, and tomorrow's redeploy, at that share of the book's capital.
+        """
         # Regime filter: read the regime through the PIT guard *first*. When it is risk-off, the
         # basket is not held at all — sell everything and park in the liquid sleeve (invariant #7:
         # the reading is admitted, so a future-dated regime trips the guard rather than leaking).
         self._pending = None
-        if self._params.regime_filter:
+        if self._params.regime_filter and early is None:
             (reading,) = ctx.pit.admit(self._data.regime(ctx.session))
             if not reading.risk_on:
                 return self._park(ctx, reading)
@@ -953,6 +1253,10 @@ class MomentumV2Policy:
         # top ``top_n`` (no banding — the naive rule). A held name inside this band is retained.
         band = self._params.sell_band if self._params.sell_band is not None else self._params.top_n
         keep = {record.isin for record in ranked[:band]}
+        if self._params.rank_ordered_buys:
+            self._rank_of = {record.isin: rank for rank, record in enumerate(ranked)}
+        if self._params.sector_refill:
+            chosen = self._sector_refill(ctx, ranked, keep)
         target = {record.isin: record for record in chosen}
         slots: dict[str, Decimal] | None = None
         if self._params.absolute_momentum:
@@ -982,6 +1286,15 @@ class MomentumV2Policy:
         sells = self._sells(held, keep)
         # A1's cash slots cap the basket at the passing names' share of capital.
         exposure = _ONE if slots is None else sum(slots.values(), _ZERO)
+        if exposure_cap != _ONE:  # M14.9 scale-in: part of the basket now, the rest next month
+            exposure = exposure * exposure_cap
+            weights = self._weights_for(target) if slots is None else slots
+            slots = {
+                isin: (weight * exposure_cap).quantize(_WEIGHT_QUANTUM)
+                for isin, weight in weights.items()
+            }
+        if early is not None:
+            overlay_evidence.append(early)
         trims: list[tuple[OrderRequest, str]] = []
         if self._params.vol_target_annual is not None and target:
             vol_exposure = self._exposure(target)
@@ -1004,6 +1317,8 @@ class MomentumV2Policy:
             # the slot weights go (summing below one), so the redeploy also leaves the cash slots.
             self._pending = self._weights_for(target) if slots is None else slots
 
+        if self._params.rank_ordered_buys:
+            buys = self._in_rank_order(buys)
         orders = tuple(order for order, _ in (*sells, *trims, *buys))
         entries = tuple(self._entry(ctx, order, note) for order, note in (*sells, *trims, *buys))
         evidence = self._evidence(
@@ -1304,6 +1619,8 @@ class MomentumV2Policy:
             )
             for order in allocation.orders
         ]
+        if self._params.rank_ordered_buys:
+            buys = self._in_rank_order(buys)
         orders = tuple(order for order, _ in buys)
         entries = tuple(self._entry(ctx, order, note) for order, note in buys)
         evidence = EvidenceBundle(
