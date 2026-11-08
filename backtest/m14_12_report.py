@@ -303,18 +303,37 @@ def whipsaw_table(facts: Sequence[ComboFacts]) -> list[str]:
     return out
 
 
-def provenance_check(facts: Sequence[ComboFacts], m14_10_dir: Path | None) -> list[str]:
-    """D13's and C0's replay digests against M14.10's runs of the same spec digest."""
+#: The spec fields that name a run's strategy and window; the rest describe the lake's inputs.
+_IDENTITY = ("runner", "start", "end", "universe", "parameters")
+
+
+def provenance_check(
+    facts: Sequence[ComboFacts], run_dir: Path, m14_10_dir: Path | None
+) -> list[str]:
+    """D13's and C0's replay digests against M14.10's runs of the same strategy and window.
+
+    A run is matched on its identity (runner, window, universe, parameters), not its spec digest:
+    the spec also fingerprints lake inputs that grow between campaigns (the corporate-action
+    calendar, split rescales), which moves the digest without moving the strategy. The fields
+    that differ are named, so an equal replay digest reads as "the same decisions on a lake whose
+    inputs moved", never as an unexamined match.
+    """
     if m14_10_dir is None:
         return []
+    theirs: dict[tuple[str, ...], dict[str, Any]] = {}
+    for path in sorted((m14_10_dir / "runs").glob("*.json")):
+        summary = _load(path)
+        theirs[tuple(str(summary["spec"].get(k, "")) for k in _IDENTITY)] = summary
     out = [
         "## D13 and C0 against M14.10's runs (generated)",
         "",
-        f"Same spec digest, looked up in `{m14_10_dir.name}`; the replay digest covers the "
-        "journal, the book and the rails byte for byte.",
+        f"Matched in `{m14_10_dir.name}` on runner, window, universe and parameters. The "
+        "replay digest covers the journal, the book and the rails byte for byte; **spec fields "
+        "that differ** are the lake inputs the spec also fingerprints.",
         "",
-        "| Window | Floor | Strategy | Spec digest | M14.10 replay digest equal? |",
-        "| --- | --- | --- | --- | --- |",
+        "| Window | Floor | Strategy | Spec digest (M14.12 / M14.10) | Replay digest equal? | "
+        "Spec fields that differ |",
+        "| --- | --- | --- | --- | --- | --- |",
     ]
     order = {_D13.label: 0, _C0.label: 1}
     rows = sorted(
@@ -322,13 +341,20 @@ def provenance_check(facts: Sequence[ComboFacts], m14_10_dir: Path | None) -> li
         key=lambda f: (_WINDOW_ORDER.index(f.window), f.floor, order[f.label]),
     )
     for f in rows:
-        summary = m14_10_dir / "runs" / f"{f.digest}.json"
-        if summary.is_file():
-            equal = "yes" if _load(summary)["replay_digest"] == f.replay_digest else "**no**"
-        else:
-            equal = "not in M14.10"
+        ours = _load(run_dir / "runs" / f"{f.digest}.json")
+        match = theirs.get(tuple(str(ours["spec"].get(k, "")) for k in _IDENTITY))
+        if match is None:
+            out.append(
+                f"| {f.window} | {_floor_label(f.floor)} | {f.label} | `{f.digest[:12]}` / — "
+                "| not in M14.10 | — |"
+            )
+            continue
+        equal = "yes" if match["replay_digest"] == f.replay_digest else "**no**"
+        keys = sorted(set(ours["spec"]) | set(match["spec"]))
+        moved = [k for k in keys if ours["spec"].get(k) != match["spec"].get(k)]
         out.append(
-            f"| {f.window} | {_floor_label(f.floor)} | {f.label} | `{f.digest[:12]}` | {equal} |"
+            f"| {f.window} | {_floor_label(f.floor)} | {f.label} | `{f.digest[:12]}` / "
+            f"`{match['digest'][:12]}` | {equal} | {', '.join(f'`{k}`' for k in moved) or '—'} |"
         )
     out.append("")
     return out
@@ -585,7 +611,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             facts,
             manifests={args.run_dir.name: manifest},
             selected=results.get("selected", ""),
-            provenance=provenance_check(facts, args.m14_10_dir),
+            provenance=provenance_check(facts, args.run_dir, args.m14_10_dir),
             hand_written=hand_written,
         ),
         encoding="utf-8",

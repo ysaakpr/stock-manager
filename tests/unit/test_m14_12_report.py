@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import json
+from dataclasses import replace
 from datetime import date
 from decimal import Decimal
+from pathlib import Path
 
 from backtest.m12_rerun import EARLY_EXIT_COMBO_SET
 from backtest.m14_5_report import RunFacts, Switches
@@ -170,3 +173,41 @@ def test_a_deeper_drawdown_fails_the_two_point_condition() -> None:
     assert not c.drawdown and c.worst == Decimal("0.03")
     table = "\n".join(decision_table(facts, C1_L))
     assert f"| {C1_L} | D13 | yes | 8 / 8 | no (worst +3.00pp) | no |" in table
+
+
+def test_provenance_matches_on_identity_and_names_moved_lake_inputs(tmp_path: Path) -> None:
+    from backtest.m14_12_report import ComboFacts, ExitSwitches, provenance_check
+
+    spec = {
+        "runner": "momentum_v2",
+        "start": "2021-09-01",
+        "end": "2026-08-31",
+        "universe": "u",
+        "parameters": "p",
+    }
+    ours, theirs = tmp_path / "ours", tmp_path / "theirs"
+    for root, digest, actions in ((ours, "aaaa", "calendar[2]"), (theirs, "bbbb", "calendar[1]")):
+        (root / "runs").mkdir(parents=True)
+        summary = {
+            "digest": digest,
+            "replay_digest": "same",
+            "spec": {**spec, "book_actions": actions},
+        }
+        (root / "runs" / f"{digest}.json").write_text(json.dumps(summary), encoding="utf-8")
+    fact = _fact("wf-verification", LOW_FLOOR, D13_L, "0.2")
+    combo = ComboFacts(
+        entry=replace(fact, base=replace(fact.base, digest="aaaa", replay_digest="same")),
+        exits=ExitSwitches((), (), 0, 0, 0, 0, 0),
+    )
+
+    def row() -> str:
+        lines = provenance_check([combo], ours, theirs)
+        return next(line for line in lines if line.startswith("| wf-verification"))
+
+    assert "`aaaa` / `bbbb` | yes | `book_actions` |" in row()
+    # Inversion: a different replay digest under the same identity is flagged, never passed.
+    path = theirs / "runs" / "bbbb.json"
+    summary = json.loads(path.read_text(encoding="utf-8"))
+    summary["replay_digest"] = "other"
+    path.write_text(json.dumps(summary), encoding="utf-8")
+    assert "| **no** |" in row()
