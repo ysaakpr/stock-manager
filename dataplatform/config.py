@@ -369,6 +369,19 @@ class Settings(BaseSettings):
         default=None, description="required only when ALERT_PROVIDER=telegram"
     )
 
+    # ── ops guardian (the box's systemd watchdog; dataplatform.ops_guardian) ──────────────────
+    ops_guardian_state_file: Path = Field(
+        default=Path("~/campaign/watchdog/guardian.json"),
+        description=(
+            "the heartbeat/open-alerts JSON the ops guardian rewrites every tick; read by the "
+            "ops_guardian job on the host, absolute or ~-prefixed"
+        ),
+    )
+    ops_guardian_stale_after_minutes: Annotated[int, Field(ge=1)] = Field(
+        default=15,
+        description="a guardian heartbeat older than this fails the ops_guardian job (Ops: ERROR)",
+    )
+
     # ── M17 web research (analyst.websearch): vendors, routing, budgets, limits ───────────────
     #: The vendors that share search requests. Each request goes to ONE of them, picked by a
     #: rotation weighted by each one's remaining monthly budget; if it fails or finds nothing,
@@ -547,6 +560,17 @@ class Settings(BaseSettings):
     @classmethod
     def _anchor_at_repo_root(cls, value: Path) -> Path:
         return value if value.is_absolute() else REPO_ROOT / value
+
+    @field_validator("ops_guardian_state_file")
+    @classmethod
+    def _guardian_state_file_absolute(cls, value: Path) -> Path:
+        """The file lives outside the checkout, beside the guardian; a relative path is a typo."""
+        expanded = value.expanduser()
+        if not expanded.is_absolute():
+            raise ValueError(
+                f"ops_guardian_state_file must be absolute or ~-prefixed, got {str(value)!r}"
+            )
+        return expanded
 
     @field_validator("backup_root")
     @classmethod

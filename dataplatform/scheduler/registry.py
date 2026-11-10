@@ -86,6 +86,7 @@ __all__ = [
     "macro_release_capture",
     "news_capture",
     "nse_daily_capture",
+    "ops_guardian",
     "paper_session",
     "postgres_backup",
     "shareholding_poll",
@@ -1042,6 +1043,35 @@ FAILURE_ALERTS = Job(
 )
 
 
+def ops_guardian(context: JobContext) -> None:
+    """The ops guardian's row on the Ops page (OPS-GUARD): is it alive, and what does it hold open.
+
+    What it does: reads the box guardian's heartbeat file (`ops_guardian_state_file`), fails the
+    run when the heartbeat is missing or older than `ops_guardian_stale_after_minutes`, and
+    otherwise pages the guardian's alert onsets and resolutions through the configured alerter,
+    deduplicated in `alert_condition`. See `dataplatform.ops_guardian`.
+    What it assumes: the scheduler runs on the host that runs the guardian (it does: both are
+    user units on the box), migrated through 0026.
+    What it never does: fetch anything, write to the guardian's files, or resolve the guardian's
+    alerts on a stale heartbeat. The import is deferred for the same reason the others are.
+    """
+    from dataplatform.ops_guardian import run_ops_guardian_job
+
+    run_ops_guardian_job(context)
+
+
+#: Every 5 minutes, the guardian's own cadence: a file read and a few ledger reads. A FAILED run
+#: is the guardian gone silent, which `failure_alerts` pages as any failed job.
+OPS_GUARDIAN = Job(
+    name="ops_guardian",
+    cron="*/5 * * * *",
+    fn=ops_guardian,
+    timeout=timedelta(minutes=2),
+    description="Ops guardian heartbeat (stale = ERROR) and its alerts, paged once (OPS-GUARD)",
+    registered_at=datetime(2026, 11, 10, 15, 0, tzinfo=IST),
+)
+
+
 def paper_session(context: JobContext) -> None:
     """The daily paper-trading session (M13.1): one session of each paper book, D13 first.
 
@@ -1408,6 +1438,7 @@ def default_registry() -> JobRegistry:
             ANNOUNCEMENTS_CAPTURE,
             NEWS_CAPTURE,
             FAILURE_ALERTS,
+            OPS_GUARDIAN,
             PAPER_SESSION,
             M17_FUND_MANAGERS,
             FUNDAMENTALS_FORWARD,
