@@ -34,8 +34,13 @@ Three facts shape this module:
   a results meeting when :data:`RESULTS_PATTERN` matches its purpose or its description. Measured on
   the July 2026 payload (1,811 rows): every row whose text says "results" says "financial results".
 
-Identity is ISIN (invariant #2); `symbol` is display only. Offline by construction (B8): the parser
-takes bytes or an `L0Ref`; only `dataplatform.ingest.fetcher` opens a socket.
+Identity is ISIN (invariant #2); `symbol` is display only. NSE states the company's *original*
+ISIN (`sm_isin`), so a capture given a `FilingIsinResolver` re-keys each row to the ISIN live on
+its knowable date and keeps the stated one in `isin_as_filed` (DQ-ISIN,
+`dataplatform.identity.filing_isin`); merges key on the stated one, so a re-key never duplicates.
+
+Offline by construction (B8): the parser takes bytes or an `L0Ref`; only
+`dataplatform.ingest.fetcher` opens a socket.
 """
 
 from __future__ import annotations
@@ -52,6 +57,7 @@ import pyarrow.parquet as pq
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from dataplatform.clock import IST
+from dataplatform.identity.filing_isin import FilingIsin, FilingIsinResolver, RekeyTally, rekey_rows
 from dataplatform.ingest.models import ISIN_PATTERN, ParseError
 from dataplatform.ingest.source_register import SourceRegister
 from dataplatform.ingest.source_register import load as load_register
@@ -75,6 +81,8 @@ __all__ = [
     "parse_l0",
     "read_l1",
     "read_pit",
+    "rekey",
+    "write_partition",
 ]
 
 _LOG = get_logger(__name__)
@@ -128,6 +136,9 @@ class BoardMeetingRow(BaseModel):
     is_results: bool
     source: str = SOURCE_ID
     l0_key: str | None = None
+    #: The ISIN NSE stated (`sm_isin`) when `isin` was re-keyed through the lineage (DQ-ISIN);
+    #: None when no re-key has run, in which case `isin` is the stated one.
+    isin_as_filed: str | None = Field(default=None, pattern=ISIN_PATTERN)
 
     @field_validator("disseminated_at")
     @classmethod
@@ -137,9 +148,14 @@ class BoardMeetingRow(BaseModel):
         return value
 
     @property
+    def filed_isin(self) -> str:
+        """The ISIN NSE stated for this intimation, whether or not `isin` was re-keyed."""
+        return self.isin_as_filed or self.isin
+
+    @property
     def key(self) -> tuple[str, date, str, datetime]:
-        """The identity a merge de-duplicates on."""
-        return (self.isin, self.meeting_date, self.purpose, self.disseminated_at)
+        """The identity a merge de-duplicates on: the *stated* ISIN, stable across a re-key."""
+        return (self.filed_isin, self.meeting_date, self.purpose, self.disseminated_at)
 
 
 def knowable_date_of(disseminated_at: datetime) -> date:
@@ -258,8 +274,41 @@ _L1_SCHEMA: Final = pa.schema(
         pa.field("is_results", pa.bool_(), nullable=False),
         pa.field("source", pa.string(), nullable=False),
         pa.field("l0_key", pa.string(), nullable=True),
+        pa.field("isin_as_filed", pa.string(), nullable=True),
     ]
 )
+
+#: Columns added after the first partitions were written, with what a partition lacking one
+#: means: `isin_as_filed` absent is a partition no re-key has touched, so `isin` is as stated.
+_ADDED_COLUMNS: Final[Mapping[str, Any]] = {"isin_as_filed": None}
+
+
+def rekey(
+    rows: Sequence[BoardMeetingRow], resolver: FilingIsinResolver
+) -> tuple[tuple[BoardMeetingRow, ...], RekeyTally]:
+    """Re-key ``rows`` to the ISIN each stated ISIN had become on the row's knowable date.
+
+    What it never does: change a field other than `isin` / `isin_as_filed`, or the row order.
+    """
+
+    def rebuild(row: BoardMeetingRow, outcome: FilingIsin) -> BoardMeetingRow:
+        return row.model_copy(update={"isin": outcome.isin, "isin_as_filed": outcome.as_filed})
+
+    return rekey_rows(
+        rows,
+        resolver,
+        as_filed=lambda r: r.filed_isin,
+        knowable=lambda r: r.knowable_date,
+        current=lambda r: (r.isin, r.isin_as_filed),
+        rebuild=rebuild,
+    )
+
+
+def write_partition(
+    day: date, rows: Sequence[BoardMeetingRow], *, data_root: Path | None = None
+) -> Path:
+    """Write ``rows`` as the whole of ``day``'s partition (atomic rename). Used by the re-key."""
+    return _write_partition(day, rows, data_root)
 
 
 def _write_partition(day: date, rows: Sequence[BoardMeetingRow], data_root: Path | None) -> Path:
@@ -274,7 +323,12 @@ def _write_partition(day: date, rows: Sequence[BoardMeetingRow], data_root: Path
 
 
 def _rows_of(path: Path) -> tuple[BoardMeetingRow, ...]:
-    table = pq.read_table(path).cast(_L1_SCHEMA)
+    table = pq.read_table(path)
+    for name, default in _ADDED_COLUMNS.items():
+        if name not in table.column_names:
+            column = _L1_SCHEMA.field(name)
+            table = table.append_column(column, pa.array([default] * table.num_rows, column.type))
+    table = table.select(_L1_SCHEMA.names).cast(_L1_SCHEMA)
     return tuple(BoardMeetingRow(**record) for record in table.to_pylist())
 
 
@@ -286,12 +340,18 @@ def read_l1(knowable: date, *, data_root: Path | None = None) -> tuple[BoardMeet
     return _rows_of(path)
 
 
-def merge_l1(rows: Iterable[BoardMeetingRow], *, data_root: Path | None = None) -> int:
+def merge_l1(
+    rows: Iterable[BoardMeetingRow],
+    *,
+    data_root: Path | None = None,
+    resolver: FilingIsinResolver | None = None,
+) -> int:
     """Merge rows into their knowable-date partitions; return how many rows were new.
 
     What it does: for each knowable date the rows carry, rewrites that partition as the union of
     what it held and the new rows, keyed on :attr:`BoardMeetingRow.key` (the held row wins, so its
-    original `l0_key` stays). Partitions with nothing new are not rewritten.
+    original `l0_key` stays). Partitions with nothing new are not rewritten. With ``resolver``,
+    every row of a rewritten partition is re-keyed through the lineage first (`rekey`).
     What it never does: drop a held row, or move a row to another knowable date.
     """
     by_day: dict[date, dict[tuple[str, date, str, datetime], BoardMeetingRow]] = {}
@@ -307,7 +367,16 @@ def merge_l1(rows: Iterable[BoardMeetingRow], *, data_root: Path | None = None) 
         if not new:
             continue
         added += len(new)
-        path = _write_partition(day, [*held.values(), *new.values()], data_root)
+        merged: Sequence[BoardMeetingRow] = [*held.values(), *new.values()]
+        if resolver is not None:
+            merged, tally = rekey(merged, resolver)
+            _LOG.info(
+                "board_meetings.rekeyed",
+                source=SOURCE_ID,
+                knowable_date=day.isoformat(),
+                **tally.as_dict(),
+            )
+        path = _write_partition(day, merged, data_root)
         _LOG.info(
             "board_meetings.l1_merged",
             source=SOURCE_ID,

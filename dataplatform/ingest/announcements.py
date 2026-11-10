@@ -34,7 +34,7 @@ engine (`dataplatform.ingest.fetcher`) is the only thing in the platform that op
 from __future__ import annotations
 
 import json
-from collections.abc import Iterator, Mapping
+from collections.abc import Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import date, datetime
 from pathlib import Path
@@ -45,6 +45,7 @@ import pyarrow.parquet as pq
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
 
 from dataplatform.clock import IST
+from dataplatform.identity.filing_isin import FilingIsin, FilingIsinResolver, RekeyTally, rekey_rows
 from dataplatform.ingest.fetcher import (
     Fetcher,
     FetchHTTPError,
@@ -77,6 +78,7 @@ __all__ = [
     "parse_nse",
     "parse_nse_l0",
     "read_l1",
+    "rekey",
     "write_l1",
 ]
 
@@ -168,6 +170,22 @@ class AnnouncementRow(BaseModel):
     l0_key: str | None = Field(
         default=None, description="`source/date/filename` of the L0 payload this was derived from"
     )
+    isin_as_filed: str | None = Field(
+        default=None,
+        pattern=ISIN_PATTERN,
+        description="the ISIN the exchange stated, when `isin` was re-keyed through the lineage "
+        "(DQ-ISIN); None when no re-key has run, and `isin` is then the stated one",
+    )
+
+    @property
+    def filed_isin(self) -> str:
+        """The ISIN the exchange stated for this disclosure, whether or not `isin` was re-keyed."""
+        return self.isin_as_filed or self.isin
+
+    @property
+    def knowable_date(self) -> date:
+        """The IST date the disclosure was disseminated: the date the lineage is walked as of."""
+        return self.ts.astimezone(IST).date()
 
     @field_validator("ts")
     @classmethod
@@ -440,7 +458,7 @@ def dedupe(rows: list[AnnouncementRow]) -> tuple[AnnouncementRow, ...]:
         key = (
             (row.source, "id", row.source_ref)
             if row.source_ref is not None
-            else (row.source, row.isin, row.ts.isoformat(), row.subject)
+            else (row.source, row.filed_isin, row.ts.isoformat(), row.subject)
         )
         if key in seen:
             continue
@@ -638,8 +656,36 @@ _L1_SCHEMA: Final = pa.schema(
         pa.field("source_ref", pa.string(), nullable=True),
         pa.field("logical_date", pa.date32(), nullable=False),
         pa.field("l0_key", pa.string(), nullable=True),
+        pa.field("isin_as_filed", pa.string(), nullable=True),
     ]
 )
+
+#: Columns added after the first partitions were written, with what a partition lacking one
+#: means: `isin_as_filed` absent is a partition no re-key has touched, so `isin` is as stated.
+_ADDED_COLUMNS: Final[Mapping[str, Any]] = {"isin_as_filed": None}
+
+
+def rekey(
+    rows: Sequence[AnnouncementRow], resolver: FilingIsinResolver
+) -> tuple[tuple[AnnouncementRow, ...], RekeyTally]:
+    """Re-key ``rows`` to the ISIN each stated ISIN had become on its dissemination date (IST).
+
+    NSE's `sm_isin` is the company's original ISIN (DQ-ISIN); a BSE row's ISIN came from the D2
+    scrip master and is already the live one, so the walk leaves it where it is.
+    What it never does: change a field other than `isin` / `isin_as_filed`, or the row order.
+    """
+
+    def rebuild(row: AnnouncementRow, outcome: FilingIsin) -> AnnouncementRow:
+        return row.model_copy(update={"isin": outcome.isin, "isin_as_filed": outcome.as_filed})
+
+    return rekey_rows(
+        rows,
+        resolver,
+        as_filed=lambda r: r.filed_isin,
+        knowable=lambda r: r.knowable_date,
+        current=lambda r: (r.isin, r.isin_as_filed),
+        rebuild=rebuild,
+    )
 
 
 def write_l1(batch: AnnouncementBatch, *, data_root: Path | None = None) -> Path:
@@ -721,7 +767,12 @@ def iter_l1(
 
 def _rows_of(path: Path) -> tuple[AnnouncementRow, ...]:
     """Parse one L1 partition file into rows, enforcing the declared schema on read."""
-    records = pq.read_table(path, schema=_L1_SCHEMA).to_pylist()
+    table = pq.read_table(path)
+    for name, default in _ADDED_COLUMNS.items():
+        if name not in table.column_names:
+            column = _L1_SCHEMA.field(name)
+            table = table.append_column(column, pa.array([default] * table.num_rows, column.type))
+    records = table.select(_L1_SCHEMA.names).cast(_L1_SCHEMA).to_pylist()
     return tuple(
         AnnouncementRow(
             ts=record["ts"],
@@ -734,6 +785,7 @@ def _rows_of(path: Path) -> tuple[AnnouncementRow, ...]:
             attachment_ref=_none_or_str(record["attachment_ref"]),
             source_ref=_none_or_str(record["source_ref"]),
             l0_key=_none_or_str(record["l0_key"]),
+            isin_as_filed=_none_or_str(record["isin_as_filed"]),
         )
         for record in records
     )
@@ -753,6 +805,7 @@ def _to_record(row: AnnouncementRow, *, logical_date: date) -> dict[str, Any]:
         "source_ref": row.source_ref,
         "logical_date": logical_date,
         "l0_key": row.l0_key,
+        "isin_as_filed": row.isin_as_filed,
     }
 
 

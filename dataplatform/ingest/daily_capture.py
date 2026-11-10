@@ -70,6 +70,7 @@ from typing import TYPE_CHECKING, Any, Final
 from dataplatform.alerts import Alerter, AlertOutcome, Severity, build_alerter
 from dataplatform.clock import Clock, SystemClock
 from dataplatform.config import Settings, get_settings
+from dataplatform.identity.filing_isin import FilingIsinResolver, load_filing_resolver
 from dataplatform.identity.master import IdentityMaster, IdentityStore
 from dataplatform.ingest import announcements as ann
 from dataplatform.ingest import gdelt, rss, shareholding
@@ -260,6 +261,10 @@ class CaptureContext:
     #: connection commits next: the publish when the capture lands, or the FAILED row when a later
     #: step fails after the L1 write that raised them — the rows they describe are in L1 either way.
     raise_findings: Callable[[Sequence[QualityFinding]], object] = lambda _findings: None
+    #: DQ-ISIN: the lineage walk that re-keys a filing feed's stated ISIN (board meetings,
+    #: announcements, shareholding) to the ISIN live on the row's knowable date. The default
+    #: re-keys nothing; production reads `isin_lineage` once per run.
+    filing_isins: Callable[[], FilingIsinResolver] = FilingIsinResolver.empty
 
     def bse_scrip_index(self) -> Mapping[str, str]:
         """The BSE scrip→ISIN map, from the injected one or built from the D2 master."""
@@ -905,7 +910,7 @@ def capture_board_meetings(ctx: CaptureContext, fetcher: Fetcher, *, owed: date)
 def _merge_board_meetings(
     rows: Sequence[board_meetings.BoardMeetingRow], ctx: CaptureContext, ref: L0Ref
 ) -> int:
-    added = board_meetings.merge_l1(rows, data_root=ctx.data_root)
+    added = board_meetings.merge_l1(rows, data_root=ctx.data_root, resolver=ctx.filing_isins())
     _LOG.info(
         "capture.board_meetings_merged",
         source=board_meetings.SOURCE_ID,
@@ -956,7 +961,9 @@ def backfill_board_meetings(ctx: CaptureContext, start: date, end: date) -> Capt
                     filename,
                 )
                 rows = board_meetings.parse_l0(ctx.l0, ref)
-                added = board_meetings.merge_l1(rows, data_root=ctx.data_root)
+                added = board_meetings.merge_l1(
+                    rows, data_root=ctx.data_root, resolver=ctx.filing_isins()
+                )
             except Exception as exc:  # containment: reported per window, the range goes on
                 _LOG.error(
                     "capture.board_meetings_backfill_failed",
@@ -1098,7 +1105,8 @@ def capture_shareholding(
 
 def _write_shareholding(ctx: CaptureContext, snapshot: shareholding.ShareholdingSnapshot) -> int:
     """Merge a poll into L1 and raise its BC3 / no-ISIN / bad-ISIN findings (D17: never silent)."""
-    shareholding.merge_l1(snapshot, data_root=ctx.data_root)
+    shareholding.merge_l1(snapshot, data_root=ctx.data_root, resolver=ctx.filing_isins())
+    # Findings stay on the ISIN as stated: they describe the filing the master published.
     ctx.raise_findings(shareholding.quality_findings(snapshot))
     return len(snapshot.rows)
 
@@ -1347,12 +1355,14 @@ def capture_announcements(
             first = fresh[source][0][0]
             ctx.tracker.mark_fetched(source, day, checksum=first.sha256, l0_path=first.key)
             ctx.tracker.mark_validated(source, day)
+        landed, tally = ann.rekey(ann.dedupe(all_rows), ctx.filing_isins())
+        _LOG.info("capture.announcements_rekeyed", day=day.isoformat(), **tally.as_dict())
         ann.write_l1(
             ann.AnnouncementBatch(
                 logical_date=day,
                 source=ann.ANNOUNCEMENTS_DATASET,
                 l0_key=None,
-                rows=ann.dedupe(all_rows),
+                rows=landed,
             ),
             data_root=ctx.data_root,
         )
@@ -1636,11 +1646,17 @@ def _production(context: JobContext) -> Iterator[CaptureContext]:
     calendar = trading_calendar()
     with connection(settings) as conn:
         cache: list[IdentityMaster] = []
+        lineage: list[FilingIsinResolver] = []
 
         def master() -> IdentityMaster:
             if not cache:
                 cache.append(IdentityStore(conn, clock=clock).load_master())
             return cache[0]
+
+        def filing_isins() -> FilingIsinResolver:
+            if not lineage:
+                lineage.append(load_filing_resolver(conn))
+            return lineage[0]
 
         def fetchers(hosts: Sequence[str], command: str) -> AbstractContextManager[Fetcher]:
             return leased_fetcher(
@@ -1665,6 +1681,7 @@ def _production(context: JobContext) -> Iterator[CaptureContext]:
             commit=conn.commit,
             data_root=settings.data_root,
             raise_findings=partial(persist_findings, conn, clock=clock),
+            filing_isins=filing_isins,
         )
         conn.commit()
 
