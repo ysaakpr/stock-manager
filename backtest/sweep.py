@@ -72,7 +72,10 @@ from backtest.policies.momentum_v2 import (
     D13_RANK_ORDERED_BUYS,
     D13_SECTOR_REFILL,
     D13_V2_SECTOR_REFILL,
+    PAPER_CANDIDATE_V2_SREFILL_2026_11_07,
     PAPER_RATIFIED_2026_09_06,
+    V2_SREFILL_DAILY_EXIT,
+    V2_SREFILL_DAILY_EXIT_BANDED,
     MomentumV2Parameters,
 )
 from backtest.policies.naive_momentum import MomentumParameters
@@ -121,9 +124,13 @@ from dataplatform.query import QueryService
 __all__ = [
     "ARMS",
     "BAND_HIT_ARM",
+    "COMBO_C0",
+    "COMBO_C1",
+    "COMBO_C2",
     "D13_PAPER_BASELINE",
     "DURATION_ARMS",
     "EARLY_ENTRY_ARMS",
+    "EARLY_EXIT_COMBO_ARMS",
     "EARNINGS_SURPRISE_ARM",
     "H1_RESIDUAL_MOMENTUM",
     "H2_BAND_HIT_AVOIDANCE",
@@ -445,6 +452,39 @@ NIFTY500_WF_ARMS: tuple[Arm, ...] = (
         note="V2's momentum-turn re-entry and S+refill's rank-ordered, sector-refilled buys "
         "together; every rebalance, the early re-entry included, uses the refill",
         v2=D13_V2_SECTOR_REFILL,
+    ),
+)
+
+#: M14.12 (pre-registration 2026-11-07): the paper candidate (C0, D40's book) and C0 with M14.5's
+#: daily exit, banded (C1) and unbanded (C2). Re-entry is C0's own: the monthly rebalance and the
+#: V2 trigger, once per parked spell; each daily park opens a new spell. Research arms only.
+COMBO_C0 = "C0 V2 + S+refill (paper candidate)"
+COMBO_C1 = "C1 C0 + daily exit, 2% band"
+COMBO_C2 = "C2 C0 + daily exit, unbanded"
+EARLY_EXIT_COMBO_ARMS: tuple[Arm, ...] = (
+    Arm(
+        label=COMBO_C0,
+        family="early entry + exit (M14.12)",
+        reference=D13_PAPER_BASELINE.label,
+        note="PAPER_CANDIDATE_V2_SREFILL_2026_11_07 exactly: V2's momentum-turn re-entry with "
+        "S+refill's rank-ordered, sector-refilled buys; exits monthly, as D13",
+        v2=PAPER_CANDIDATE_V2_SREFILL_2026_11_07,
+    ),
+    Arm(
+        label=COMBO_C1,
+        family="early entry + exit (M14.12)",
+        reference=COMBO_C0,
+        note="as C0, and an invested book is parked on the first non-rebalance session the TRI "
+        "closes below 0.98 x its 200d MA; it re-enters only by C0's rules",
+        v2=V2_SREFILL_DAILY_EXIT_BANDED,
+    ),
+    Arm(
+        label=COMBO_C2,
+        family="early entry + exit (M14.12)",
+        reference=COMBO_C0,
+        note="as C0, and an invested book is parked on the first non-rebalance session the TRI "
+        "closes below its 200d MA; it re-enters only by C0's rules",
+        v2=V2_SREFILL_DAILY_EXIT,
     ),
 )
 

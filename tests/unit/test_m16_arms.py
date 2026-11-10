@@ -41,6 +41,7 @@ def test_default_sets_are_unchanged() -> None:
         "early-entry",
         "sector-order",
         "nifty500-wf",
+        "early-exit-combo",
         "m16",
         "m16-fundamentals",
     }
