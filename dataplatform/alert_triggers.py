@@ -112,6 +112,7 @@ class Trigger(StrEnum):
     QUALITY_RED = "quality_red"
     CALENDAR_EXPIRY = "calendar_expiry"
     JOB_FAILED = "job_failed"
+    OPS_GUARDIAN = "ops_guardian"  # the box guardian's open alerts (dataplatform.ops_guardian)
 
 
 @dataclass(frozen=True, slots=True)

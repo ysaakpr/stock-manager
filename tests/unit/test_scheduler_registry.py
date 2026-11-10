@@ -135,6 +135,7 @@ def test_the_default_registry_holds_exactly_the_jobs_production_runs() -> None:
         "announcements_capture",
         "news_capture",
         "failure_alerts",
+        "ops_guardian",
         "paper_session",
         "m17_fund_managers",
         "fundamentals_forward",
@@ -172,6 +173,8 @@ def test_the_default_registry_holds_exactly_the_jobs_production_runs() -> None:
     assert registry.get("macro_release_capture").cron == "0 10 * * sun"
     # No network and a few reads, so a short cadence bounds how long a failure goes unpaged.
     assert registry.get("failure_alerts").cron == "*/15 * * * *"
+    # The guardian ticks every 5 minutes; its row checks the heartbeat at the same cadence.
+    assert registry.get("ops_guardian").cron == "*/5 * * * *"
     # 21:45, after the EOD pipeline and the last tri_evening attempt (21:30): a rebalance reads the
     # session's own published TRI level.
     assert registry.get("paper_session").cron == "45 21 * * mon-fri"
