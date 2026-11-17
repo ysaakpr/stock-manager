@@ -1140,9 +1140,10 @@ def m17_fund_managers(context: JobContext) -> None:
 
 
 #: Until M17.8's go (pre-registration §6, §9: the 5-session dry run passes, then the owner names
-#: S0), the registered job runs the ``m17-dry`` stream only. The go flips this to False together
-#: with the `--start S0` run, in one reviewed commit.
-M17_DRY_RUN = True
+#: S0), the registered job ran the ``m17-dry`` stream only. The go flipped this to False in one
+#: reviewed commit (owner, "Go for s0", Mon 2026-11-16 22:25 IST; S0 = 2026-11-17, D41); the
+#: `--start S0` run opens the live stream and the scheduler restart after it picks this up.
+M17_DRY_RUN = False
 
 #: The M17 desk (M17.7). 22:00 IST Monday to Friday — after the 18:30 EOD pipeline, the last
 #: `tri_evening` attempt (21:30, which now lands NIFTY 500 for the bench too) and the 21:45 paper

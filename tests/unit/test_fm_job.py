@@ -1268,13 +1268,14 @@ def test_lake_delisted_names_reads_the_listing_record_not_a_missing_print() -> N
 # ── the scheduler registration ───────────────────────────────────────────────────────────────────
 
 
-def test_the_registered_job_runs_the_dry_stream_until_the_go(
+def test_the_registered_job_runs_the_live_stream_after_the_go(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     from dataplatform.scheduler import registry
 
     job = registry.default_registry().get("m17_fund_managers")
-    assert registry.M17_DRY_RUN is True and job.cron == "0 22 * * mon-fri"
+    # The owner's go (D41, S0 = 2026-11-17) flipped the job from the m17-dry stream to the live one.
+    assert registry.M17_DRY_RUN is False and job.cron == "0 22 * * mon-fri"
     assert job.timeout >= timedelta(hours=10)  # its budget runs to the 08:30 deadline
     seen: dict[str, Any] = {}
 
@@ -1283,7 +1284,7 @@ def test_the_registered_job_runs_the_dry_stream_until_the_go(
 
     monkeypatch.setattr("backtest.fm_job.run_m17_job", fake)
     job.fn(cast(Any, None))
-    assert seen == {"dry_run": True}
+    assert seen == {"dry_run": False}
 
 
 # ── invariant #13: harness text the desk journals is masked, then bounded ───────────────────────
