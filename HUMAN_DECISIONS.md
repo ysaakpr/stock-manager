@@ -1058,6 +1058,31 @@ What is unchanged:
 Pre-registration, including the opening-state rule and the trial-count caveat:
 `ops/studies/preregistration-paper-v2-srefill-2026-11-07.md`. Task M14.11.
 
+
+---
+
+### D41 — Start M17's live stream: S0 = Tue 17 Nov 2026 → **ANSWERED (owner, 2026-11-16 22:25 IST): "Go for s0".**
+
+M17.8's five counted dry sessions under the Amendment 6 mandate hashes passed
+(`ops/gates/M17-dry-run-2026-11-13.md`, PR #177). The one Commons defect that report raised for S0,
+anomaly A1 (the filing digests skipped the previous session's announcements after a clean run), was
+fixed and deployed first (PR #178). On Mon 16 Nov 2026 at 22:25 IST the owner gave the go.
+
+Taken:
+* **S0 = 2026-11-17**, the first session after the go, recorded in the pre-registration's §9
+  (`ops/studies/preregistration-m17-ai-fund-managers-2026-10-09.md`).
+* `M17_DRY_RUN = False` in `dataplatform/scheduler/registry.py`, merged without restarting the
+  scheduler, so tonight's 22:00 scheduled run still writes the `m17-dry` stream.
+* After 21:45 IST on S0, `backtest.fm_job --start 2026-11-17 --session 2026-11-17` journals `M17_S0`
+  and the 21 mandate hashes, then runs the first live session. The scheduler is restarted after it,
+  so the evenings from Wed 18 Nov run live (ops/runbooks/m17-fund-managers.md, "Starting S0").
+
+What is unchanged:
+* The mandates, prompts and roster. The 21 hashes S0 starts from are Amendment 6's. A changed hash
+  after S0 is a new manager with a new id (§7).
+* Paper only. Every book is a `SimBroker` account; a real-money version is decision #8.
+* The scoring window is S0 to S0 + 62. Nothing is claimed before it closes.
+
 ---
 
 ## Coming up
