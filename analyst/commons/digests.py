@@ -22,13 +22,17 @@ a filing already digested by either path is never digested again. Each filing's 
 bounded (:data:`MAX_FILING_CHARS`, :data:`MAX_RESULT_FACTS`). A truncated input is marked, both in
 the prompt and in the digest.
 
-**Which filings are new.** The window is ``(since, session]`` by knowable date. ``since`` is the
-session of the last run with no failures (`DigestStore.resume_after`), or, when every earlier run
-failed somewhere, the earliest of their window starts. With no earlier run it is the previous NSE
-session. It is never more than :data:`DIGEST_LOOKBACK_SESSIONS` sessions back. A capped window is
-a gap. Inside the window, a filing whose id is already in the digest store is a cache hit and
-costs nothing. So a filing is digested once across every build and every manager, and a failed
-filing is retried by the next build, until it falls out of the window.
+**Which filings are new.** The window is ``(since, session]`` by knowable date. After a clean run
+(no failures, `DigestStore.resume_after`), ``since`` is the NSE session *before* that run's
+session: NSE's announcements for day D reach L1 at 00:30 IST on D+1, after D's evening run, so a
+clean run on D never saw D's own filings and the next window must still hold them (M17 anomaly A1:
+on 12 Nov a window of ``(11-11, 11-12]`` dropped all 525 of 11 Nov's announcements). The overlap
+with the clean run's window is all cache hits. When every earlier run failed somewhere, ``since``
+is the earliest of their window starts, which already reaches back. With no earlier run it is the
+previous NSE session. It is never more than :data:`DIGEST_LOOKBACK_SESSIONS` sessions back. A
+capped window is a gap. Inside the window, a filing whose id is already in the digest store is a
+cache hit and costs nothing. So a filing is digested once across every build and every manager, and
+a failed filing is retried by the next build, until it falls out of the window.
 
 **Factual only.** The model fills :data:`DIGEST_OUTPUT_SCHEMA` (``additionalProperties: false`` at
 every level), which has no field for a recommendation, a rating or a price view.
@@ -91,6 +95,7 @@ __all__ = [
     "DigestBody",
     "DigestFailure",
     "DigestRefusedError",
+    "DigestResume",
     "DigestRun",
     "DigestSource",
     "DigestStore",
@@ -842,6 +847,19 @@ class DigestRun(_Strict):
         return not self.failures
 
 
+@dataclass(frozen=True, slots=True)
+class DigestResume:
+    """Where the store says the next window resumes: a session, and whether a clean run made it.
+
+    ``clean`` is true when ``session`` is the session of the latest clean run (no failures) before
+    the asked-for session. It is false when no earlier run was clean, and ``session`` is then the
+    earliest ``since`` of the earlier runs. The two are read differently (:func:`build_digests`).
+    """
+
+    session: date
+    clean: bool
+
+
 class DigestStore(Protocol):
     """Append-only storage for digests (keyed by filing id) and for the runs that made them."""
 
@@ -854,12 +872,14 @@ class DigestStore(Protocol):
     def record_run(self, run: DigestRun, *, recorded_at: datetime) -> bool:
         """Store ``run``. Returns ``False`` when the same run is already stored."""
 
-    def resume_after(self, before: date) -> date | None:
-        """Where the next window opens for a run on ``before``, or ``None`` with no earlier run.
+    def resume_after(self, before: date) -> DigestResume | None:
+        """Where the next window resumes for a run on ``before``, or ``None`` with no earlier run.
 
-        The latest session before ``before`` with a clean run (no failures), because a clean run
-        covered every window before it. With no clean run, the earliest ``since`` of any earlier
-        run, so a filing that failed is still in the window.
+        The latest session before ``before`` with a clean run (no failures), marked ``clean``. A
+        clean run on D covered every filing that had landed by its run, which is every window
+        before it except D's own filings (they land after it), so the caller opens the window one
+        session earlier. With no clean run, the earliest ``since`` of any earlier run, not marked
+        ``clean``, so a filing that failed is still in the window.
         """
 
 
@@ -955,15 +975,23 @@ def build_digests(
     pit = PitContext(as_of=session)
     gaps: list[Gap] = []
     try:
-        calendar = sorted(set(pit.admit(source.sessions(session, DIGEST_LOOKBACK_SESSIONS + 1))))
+        # One session beyond the lookback, so the session before a clean run at the floor is known.
+        calendar = sorted(set(pit.admit(source.sessions(session, DIGEST_LOOKBACK_SESSIONS + 2))))
     except SourceUnavailableError as exc:
         raise CommonsRefusedError(f"no session calendar: {exc}") from exc
     if not calendar or calendar[-1] != session:
         raise CommonsRefusedError(f"{session.isoformat()} is not an NSE session in the lake")
-    floor = calendar[0]
-    previous = calendar[-2] if len(calendar) > 1 else session
+    window = calendar[-(DIGEST_LOOKBACK_SESSIONS + 1) :]
+    floor = window[0]
+    previous = window[-2] if len(window) > 1 else session
     resume = store.resume_after(session)
-    since = previous if resume is None else resume
+    if resume is None:
+        since = previous
+    elif resume.clean:
+        # A clean run on D ran before D's announcements landed (00:30 IST on D+1): reopen D (A1).
+        since = max((d for d in calendar if d < resume.session), default=resume.session)
+    else:
+        since = resume.session
     if since < floor:
         gaps.append(
             Gap(

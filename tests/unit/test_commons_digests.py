@@ -263,9 +263,81 @@ def test_the_next_session_digests_only_what_is_new() -> None:
     world.announcements.append(_ann(RISING, "r-2", DAY3))
     llm = _stub(world)
     run = _run(world, store, llm, session=DAY3)
-    assert run.since == DAY2  # the last clean run
+    assert run.since == DAY1  # the session before the last clean run (A1): DAY2 is reopened
     assert run.digested == ("nse_announcements:r-2",)
+    assert set(run.cached) == {
+        "nse_announcements:r-1",
+        "nse_announcements:f-1",
+        "pit_fundamentals:F-Q1",
+    }
     assert len(llm.calls) == 1
+
+
+# The M17 dry run's A1 case, on the real dates. NSE had no session on Tue 10 Nov 2026. A session's
+# announcements reach L1 at 00:30 IST the next day, after that session's 22:00 run.
+NOV = [date(2026, 11, d) for d in (3, 4, 5, 6, 9, 11, 12, 13, 16)]
+
+
+def _nov_run(world: DigestWorld, store: DigestStore, llm: LLM, session: date) -> DigestRun:
+    return _run(world, store, llm, session=session, clock=FrozenClock(_ts(session, 22)))
+
+
+def test_a_clean_run_does_not_drop_the_previous_sessions_announcements() -> None:
+    world, store = DigestWorld(calendar=list(NOV)), InMemoryDigestStore()
+    landed = {  # what each session's announcements are, by the session they are dated
+        d: [_ann(RISING, f"r-{d.day}", d), _ann(FALLING, f"f-{d.day}", d)] for d in NOV
+    }
+    llm = _stub(DigestWorld(announcements=[a for v in landed.values() for a in v]))
+    assert _nov_run(world, store, llm, date(2026, 11, 9)).clean  # the store has a history
+
+    world.announcements.extend(landed[date(2026, 11, 9)])  # landed 00:30 on 10 Nov
+    nov11 = _nov_run(world, store, llm, date(2026, 11, 11))
+    assert nov11.since == date(2026, 11, 6)
+    assert nov11.clean and set(nov11.digested) == {"nse_announcements:r-9", "nse_announcements:f-9"}
+
+    world.announcements.extend(landed[date(2026, 11, 11)])  # 00:30 on 12 Nov, after the 11th's run
+    nov12 = _nov_run(world, store, llm, date(2026, 11, 12))
+    # The old window opened at the clean run's session, (11-11, 11-12], and digested nothing.
+    assert nov12.since == date(2026, 11, 9)
+    assert set(nov12.digested) == {"nse_announcements:r-11", "nse_announcements:f-11"}
+    assert nov12.cached == ()  # 9 Nov sits outside (11-09, 11-12]; it was the 11th's to digest
+
+    world.announcements.extend(landed[date(2026, 11, 12)])
+    nov13 = _nov_run(world, store, llm, date(2026, 11, 13))
+    assert nov13.since == date(2026, 11, 11)
+    assert set(nov13.digested) == {"nse_announcements:r-12", "nse_announcements:f-12"}
+
+    # Exactly once: one model call per announcement across the three nights, every one stored.
+    digested = [f for run in (nov11, nov12, nov13) for f in run.digested]
+    assert len(digested) == len(set(digested)) == len(llm.calls) == 6
+    assert all(store.get(f) is not None for f in digested)
+
+
+def test_a_rerun_after_a_clean_run_digests_nothing_twice() -> None:
+    world, store = DigestWorld(calendar=list(NOV)), InMemoryDigestStore()
+    llm = _stub(DigestWorld(announcements=[_ann(RISING, "r-11", date(2026, 11, 11))]))
+    _nov_run(world, store, llm, date(2026, 11, 11))
+    world.announcements.append(_ann(RISING, "r-11", date(2026, 11, 11)))
+    first = _nov_run(world, store, llm, date(2026, 11, 12))
+    again = _nov_run(world, store, llm, date(2026, 11, 12))
+    assert first.digested == ("nse_announcements:r-11",)
+    assert len(llm.calls) == 1  # the re-run serves it from the store
+    assert again.since == first.since and again.digested == ()
+    assert again.cached == ("nse_announcements:r-11",)
+    # The next run still resumes from the 12th's clean run: nothing is lost or redone.
+    nov13 = _nov_run(world, store, llm, date(2026, 11, 13))
+    assert nov13.since == date(2026, 11, 11) and nov13.digested == ()
+    assert len(llm.calls) == 1
+
+
+def test_the_window_after_failures_does_not_drift_back() -> None:
+    world, store = _world(), InMemoryDigestStore()
+    bad = {"nse_announcements:r-1": _reply({**GOOD_BODY, "recommendation": "BUY"})}
+    first = _run(world, store, _stub(world, bad))
+    second = _run(world, store, _stub(world, bad), session=DAY3)
+    assert not first.clean and not second.clean
+    # Only a clean run is stepped back; failed runs keep the earliest window start.
+    assert first.since == second.since == CALENDAR[-3]
 
 
 def test_every_manager_reads_the_one_stored_digest() -> None:
