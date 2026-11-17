@@ -26,6 +26,7 @@ from analyst.commons import (
     CommonsSheets,
     CommonsStoreError,
     DigestFailure,
+    DigestResume,
     DigestRun,
     FilingDigest,
     PostgresCommonsStore,
@@ -212,7 +213,8 @@ def test_the_window_resumes_after_the_last_clean_run(
     later, latest = day + timedelta(days=1), day + timedelta(days=2)
     with connection(scratch) as conn:
         store = PostgresDigestStore(conn)
-        assert store.resume_after(later) == day  # the clean run of the fixture
+        # the clean run of the fixture
+        assert store.resume_after(later) == DigestResume(session=day, clean=True)
         failed = DigestRun(
             trading_date=later,
             since=day,
@@ -226,7 +228,7 @@ def test_the_window_resumes_after_the_last_clean_run(
         assert store.record_run(failed, recorded_at=RECORDED_AT) is True
         assert store.record_run(failed, recorded_at=RECORDED_AT) is False
         # A failed run after a clean one: the window still opens after the clean one.
-        assert store.resume_after(latest) == day
+        assert store.resume_after(latest) == DigestResume(session=day, clean=True)
         conn.rollback()
 
 

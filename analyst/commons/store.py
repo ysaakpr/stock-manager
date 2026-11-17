@@ -28,7 +28,7 @@ from typing import Any, Final, Protocol
 
 from psycopg.types.json import Json
 
-from analyst.commons.digests import DigestRun, FilingDigest
+from analyst.commons.digests import DigestResume, DigestRun, FilingDigest
 from analyst.commons.sheets import CommonsSheets, Gap, MarketSheet, UniverseRow
 from analyst.commons.shortlist import Shortlist, ShortlistEntry
 from dataplatform.logging import get_logger
@@ -387,12 +387,13 @@ class InMemoryDigestStore:
         self._runs[key] = run
         return True
 
-    def resume_after(self, before: date) -> date | None:
+    def resume_after(self, before: date) -> DigestResume | None:
         earlier = [run for (day, _), run in self._runs.items() if day < before]
         clean = [run.trading_date for run in earlier if run.clean]
         if clean:
-            return max(clean)
-        return min((run.since for run in earlier), default=None)
+            return DigestResume(session=max(clean), clean=True)
+        earliest = min((run.since for run in earlier), default=None)
+        return None if earliest is None else DigestResume(session=earliest, clean=False)
 
     def runs(self) -> tuple[DigestRun, ...]:
         return tuple(self._runs[key] for key in sorted(self._runs))
@@ -452,7 +453,7 @@ class PostgresDigestStore:
         ).fetchone()
         return inserted is not None
 
-    def resume_after(self, before: date) -> date | None:
+    def resume_after(self, before: date) -> DigestResume | None:
         row = self._conn.execute(
             "SELECT max(trading_date) FILTER (WHERE failures = '[]'::jsonb), min(since_date) "
             "FROM commons_digest_run WHERE trading_date < %s",
@@ -462,4 +463,6 @@ class PostgresDigestStore:
             return None
         clean: date | None = row[0]
         earliest: date | None = row[1]
-        return clean if clean is not None else earliest
+        if clean is not None:
+            return DigestResume(session=clean, clean=True)
+        return None if earliest is None else DigestResume(session=earliest, clean=False)
