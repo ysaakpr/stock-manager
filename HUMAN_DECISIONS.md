@@ -1083,6 +1083,15 @@ What is unchanged:
 * Paper only. Every book is a `SimBroker` account; a real-money version is decision #8.
 * The scoring window is S0 to S0 + 62. Nothing is claimed before it closes.
 
+**Note, 2026-11-18: S0 moves to Wed 18 Nov 2026.** The 2026-11-17 start
+(`fm_job --start 2026-11-17 --session 2026-11-17`, run by the 21:50 IST timer) aborted before
+opening any book: the backup LLM CLI (`claude`) was not on the start timer's PATH
+(`LLMCredentialError`). No `M17_S0` was journaled and the scheduler was not restarted, so the 17 Nov
+22:00 run was still the `m17-dry` stream. The start script was fixed and re-armed, so S0 is the next
+session, **2026-11-18** (`fm_job --start 2026-11-18 --session 2026-11-18` at 21:50 IST, then the
+scheduler restart); Thu 19 Nov 22:00 is the first scheduled live session. The go, the mandates and
+the 21 hashes are unchanged.
+
 ---
 
 ## Coming up

@@ -99,7 +99,8 @@ open. The bench is bought at the close of the session before S0.
    ```
 
    `--start` must equal the session the run decides, and a stream starts once (a second `--start`
-   is refused).
+   is refused). Run it with the scheduler's PATH: the backup LLM CLI `claude` must resolve, or the
+   start aborts before opening any book (what happened on 2026-11-17).
 3. Restart the scheduler so the next evenings run live:
    `XDG_RUNTIME_DIR=/run/user/$(id -u) systemctl --user restart scheduler` (and `status scheduler`).
 

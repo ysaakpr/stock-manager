@@ -1274,7 +1274,7 @@ def test_the_registered_job_runs_the_live_stream_after_the_go(
     from dataplatform.scheduler import registry
 
     job = registry.default_registry().get("m17_fund_managers")
-    # The owner's go (D41, S0 = 2026-11-17) flipped the job from the m17-dry stream to the live one.
+    # The owner's go (D41, S0 = 2026-11-18) flipped the job from the m17-dry stream to the live one.
     assert registry.M17_DRY_RUN is False and job.cron == "0 22 * * mon-fri"
     assert job.timeout >= timedelta(hours=10)  # its budget runs to the 08:30 deadline
     seen: dict[str, Any] = {}
