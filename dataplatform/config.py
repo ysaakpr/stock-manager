@@ -12,13 +12,14 @@ parsing and validation, and it must stay that way so unit tests can build one of
 from __future__ import annotations
 
 import re
+from decimal import Decimal
 from enum import StrEnum
 from functools import lru_cache
 from pathlib import Path
 from typing import Annotated
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-from pydantic import Field, SecretStr, field_validator
+from pydantic import Field, SecretStr, ValidationInfo, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 #: Repo root, derived from this file's location so the defaults work from any working directory
@@ -382,6 +383,36 @@ class Settings(BaseSettings):
         description="a guardian heartbeat older than this fails the ops_guardian job (Ops: ERROR)",
     )
 
+    # ── owner alerts (dataplatform.owner_alerts): plain-English messages to the owner ────────
+    owner_alert_drawdown_pct: Annotated[Decimal, Field(gt=0, lt=100)] = Field(
+        default=Decimal(10),
+        description="a book this far below its own peak (%) alerts once, on crossing",
+    )
+    owner_alert_drawdown_step_pp: Annotated[Decimal, Field(gt=0)] = Field(
+        default=Decimal(5),
+        description="and again at each further step of this many percentage points",
+    )
+    owner_alert_session_drop_pct: Annotated[Decimal, Field(gt=0, lt=100)] = Field(
+        default=Decimal(4),
+        description="a book that loses more than this (%) in one session alerts",
+    )
+    owner_alert_stale_sessions: Annotated[int, Field(ge=0)] = Field(
+        default=2,
+        description="a key dataset whose latest date is more than this many sessions old alerts",
+    )
+    owner_alert_event_max_age_hours: Annotated[int, Field(ge=1)] = Field(
+        default=12,
+        description="a session recorded longer ago than this is not reported as fresh news",
+    )
+    owner_alert_disk_warn_pct: Annotated[int, Field(ge=1, le=100)] = Field(
+        default=90,
+        description="the morning summary asks for attention when the lake's disk is this full",
+    )
+    owner_pending_decisions_file: Path = Field(
+        default=Path("~/campaign/owner/pending-decisions.md"),
+        description="the box-local list the Monday reminder reads (`- [open] …` lines)",
+    )
+
     # ── M17 web research (analyst.websearch): vendors, routing, budgets, limits ───────────────
     #: The vendors that share search requests. Each request goes to ONE of them, picked by a
     #: rotation weighted by each one's remaining monthly budget; if it fails or finds nothing,
@@ -561,14 +592,14 @@ class Settings(BaseSettings):
     def _anchor_at_repo_root(cls, value: Path) -> Path:
         return value if value.is_absolute() else REPO_ROOT / value
 
-    @field_validator("ops_guardian_state_file")
+    @field_validator("ops_guardian_state_file", "owner_pending_decisions_file")
     @classmethod
-    def _guardian_state_file_absolute(cls, value: Path) -> Path:
+    def _guardian_state_file_absolute(cls, value: Path, info: ValidationInfo) -> Path:
         """The file lives outside the checkout, beside the guardian; a relative path is a typo."""
         expanded = value.expanduser()
         if not expanded.is_absolute():
             raise ValueError(
-                f"ops_guardian_state_file must be absolute or ~-prefixed, got {str(value)!r}"
+                f"{info.field_name} must be absolute or ~-prefixed, got {str(value)!r}"
             )
         return expanded
 

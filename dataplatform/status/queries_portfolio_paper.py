@@ -58,9 +58,11 @@ __all__ = [
     "MemoPrices",
     "PaperBook",
     "PaperFigures",
+    "PaperMark",
     "paper_choice",
     "paper_figures",
     "paper_glance",
+    "paper_nav_history",
     "paper_policy",
     "read_paper_books",
 ]
@@ -423,3 +425,36 @@ def paper_figures(conn: Connection, book: PaperBook, prices: SessionPrices) -> P
         reconciled=True,
     )
     return PaperFigures(session, prices.next_session(session), rows, totals, info, missing)
+
+
+# ── the NAV history (owner alerts: drawdown from the book's own peak) ───────────────────────
+
+_HISTORY_SQL = """
+SELECT trading_date, book_state, expected_book FROM paper_session
+WHERE book_id = %s AND book_state IS NOT NULL
+ORDER BY trading_date
+"""
+
+
+@dataclass(frozen=True, slots=True)
+class PaperMark:
+    """One decided session of a paper book at that session's close."""
+
+    trading_date: date
+    nav: Decimal | None
+    """Cash plus each holding at the session's NSE close; None when a holding has no close."""
+    cash: Decimal
+
+
+def paper_nav_history(conn: Connection, book_id: str, prices: SessionPrices) -> list[PaperMark]:
+    """Every decided session of ``book_id``, oldest first, marked the way the Portfolio page marks
+    its newest one (`_nav`: cash plus each holding at the session's close).
+
+    What it assumes: a red session (no ``book_state``) decided nothing and has no mark of its own.
+    What it never does: guess a missing close — that session's NAV is None.
+    """
+    marks: list[PaperMark] = []
+    for on, state, expected in conn.execute(_HISTORY_SQL, (book_id,)).fetchall():
+        held = _state(book_id, on, state, expected)
+        marks.append(PaperMark(trading_date=on, nav=_nav(held, prices), cash=held.cash))
+    return marks

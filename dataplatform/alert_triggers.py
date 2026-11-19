@@ -40,7 +40,7 @@ its own severity — and fails the run, so a broken registry can never silence a
 
 from __future__ import annotations
 
-from collections.abc import Callable, Collection, Iterable, Sequence
+from collections.abc import Callable, Collection, Iterable, Mapping, Sequence
 from contextlib import AbstractContextManager
 from dataclasses import dataclass, field, replace
 from datetime import date, datetime, timedelta
@@ -75,6 +75,7 @@ __all__ = [
     "ConditionLedger",
     "FinishedAttempt",
     "OpenQualityCheck",
+    "ResolutionFormatter",
     "RetryDeadline",
     "TickReport",
     "Trigger",
@@ -92,6 +93,7 @@ __all__ = [
     "registry_retry_deadline",
     "run_failure_alerts",
     "run_failure_alerts_job",
+    "send_once",
     "tick",
 ]
 
@@ -113,6 +115,11 @@ class Trigger(StrEnum):
     CALENDAR_EXPIRY = "calendar_expiry"
     JOB_FAILED = "job_failed"
     OPS_GUARDIAN = "ops_guardian"  # the box guardian's open alerts (dataplatform.ops_guardian)
+    # The owner's plain-English alerts (dataplatform.owner_alerts, 0027).
+    OWNER_KILL_SWITCH = "owner_kill_switch"
+    OWNER_LOSS = "owner_loss"
+    OWNER_STALE_DATA = "owner_stale_data"
+    OWNER_EVENT = "owner_event"  # one-shot messages (summaries, book activity), sent once per key
 
 
 @dataclass(frozen=True, slots=True)
@@ -532,6 +539,24 @@ class ConditionLedger:
             (at, at, key),
         )
 
+    def has_key(self, key: str) -> bool:
+        """Whether `key` has ever been recorded, open or resolved — `send_once`'s guard."""
+        row = self._conn.execute(
+            "SELECT 1 FROM alert_condition WHERE dedup_key = %s", (key,)
+        ).fetchone()
+        return row is not None
+
+    def record_event(
+        self, trigger: Trigger, key: str, severity: Severity, title: str, at: datetime
+    ) -> None:
+        """Record a one-shot message as sent: a row opened and resolved at the same instant."""
+        self._conn.execute(
+            "INSERT INTO alert_condition "
+            "(dedup_key, trigger, severity, title, opened_at, last_seen_at, resolved_at) "
+            "VALUES (%s, %s, %s, %s, %s, %s, %s)",
+            (key, trigger.value, severity.value, title, at, at, at),
+        )
+
 
 @dataclass(slots=True)
 class TickReport:
@@ -557,6 +582,16 @@ class _NotSentError(Exception):
         self.outcome = outcome
 
 
+#: How a cleared condition is announced: given its key, the title it paged with and the instant,
+#: the (severity, title, body) to send — or None to close it without a message (a deeper
+#: drawdown band clearing while the base band stays open is not news on its own).
+ResolutionFormatter = Callable[[str, str, datetime], tuple[Severity, str, str] | None]
+
+
+def _default_resolution(key: str, title: str, at: datetime) -> tuple[Severity, str, str]:
+    return Severity.INFO, f"resolved: {title}", f"Cleared at {at.isoformat()}: {title}"
+
+
 def reconcile(
     trigger: Trigger,
     conditions: Sequence[AlertCondition],
@@ -565,6 +600,7 @@ def reconcile(
     alerter: Alerter,
     at: datetime,
     report: TickReport,
+    resolution: ResolutionFormatter | None = None,
 ) -> None:
     """Diff one trigger's current conditions against its open rows; page onsets and resolutions.
 
@@ -578,7 +614,9 @@ def reconcile(
     alerter's own window suppressed it — rolls the write back, so the next tick tries again; a
     ledger write that raises happens before the send, so a broken ledger costs a missing page (and
     a FAILED run, which `/status/jobs` shows), never a page repeated every tick.
-    Ledger *reads* that raise propagate; `tick` isolates them per trigger.
+    Ledger *reads* that raise propagate; `tick` isolates them per trigger. `resolution` words the
+    clearing message (default: one INFO "resolved: <title>"); when it returns None the row is
+    closed without a message.
     """
     open_rows = ledger.open_keys(trigger)
     current = {condition.dedup_key: condition for condition in conditions}
@@ -608,18 +646,26 @@ def reconcile(
             report.opened.append(key)
             log.warning("alert_trigger.onset", trigger=trigger.value, dedup_key=key)
 
+    word = _default_resolution if resolution is None else resolution
     for key, title in open_rows.items():
         if key in current:
             continue
+        message = word(key, title, at)
+        if message is None:
+            try:
+                with ledger.transaction():
+                    ledger.resolve(key, at)
+            except Exception as error:
+                report.errors.append(f"{key}: resolution not written: {type(error).__name__}")
+                log.error("alert_trigger.resolve_failed", dedup_key=key, error=type(error).__name__)
+                continue
+            report.resolved.append(key)
+            log.info("alert_trigger.resolved_quietly", trigger=trigger.value, dedup_key=key)
+            continue
+        severity, resolved_title, resolved_body = message
         if _write_then_send(
             partial(ledger.resolve, key, at),
-            partial(
-                alerter.send,
-                Severity.INFO,
-                f"resolved: {title}",
-                f"Cleared at {at.isoformat()}: {title}",
-                f"{key}:resolved",
-            ),
+            partial(alerter.send, severity, resolved_title, resolved_body, f"{key}:resolved"),
             ledger=ledger,
             key=key,
             what="resolution",
@@ -728,6 +774,47 @@ def apply_acceptance(
     return accepted
 
 
+def send_once(
+    *,
+    ledger: ConditionLedger,
+    alerter: Alerter,
+    trigger: Trigger,
+    key: str,
+    severity: Severity,
+    title: str,
+    body: str,
+    at: datetime,
+    report: TickReport,
+) -> bool:
+    """Send a one-shot message once per `key`, ever; True only when it went out now.
+
+    What it does: skips a key the ledger has already recorded; otherwise records it (opened and
+    resolved at `at`) and sends in one transaction, so a send that fails leaves the key unrecorded
+    and the next run tries again.
+    What it assumes: `key` names the news itself (a book and its session, a day's summary), so a
+    restart or a re-run of the job is never a reason to send it twice.
+    """
+    try:
+        if ledger.has_key(key):
+            return False
+    except Exception as error:
+        report.errors.append(f"{key}: ledger not readable: {type(error).__name__}")
+        log.error("alert_trigger.ledger_read_failed", dedup_key=key, error=type(error).__name__)
+        return False
+    if _write_then_send(
+        partial(ledger.record_event, trigger, key, severity, title, at),
+        partial(alerter.send, severity, title, body, key),
+        ledger=ledger,
+        key=key,
+        what="message",
+        report=report,
+    ):
+        report.opened.append(key)
+        log.info("alert_trigger.sent_once", trigger=trigger.value, dedup_key=key)
+        return True
+    return False
+
+
 def _write_then_send(
     write: Callable[[], None],
     send: Callable[[], AlertOutcome],
@@ -768,6 +855,7 @@ def tick(
     ledger: ConditionLedger,
     alerter: Alerter,
     at: datetime,
+    resolutions: Mapping[Trigger, ResolutionFormatter] | None = None,
 ) -> TickReport:
     """Evaluate and reconcile each trigger in turn, each one isolated from the others' failures.
 
@@ -791,7 +879,15 @@ def tick(
             )
             continue
         try:
-            reconcile(trigger, conditions, ledger=ledger, alerter=alerter, at=at, report=report)
+            reconcile(
+                trigger,
+                conditions,
+                ledger=ledger,
+                alerter=alerter,
+                at=at,
+                report=report,
+                resolution=None if resolutions is None else resolutions.get(trigger),
+            )
         except Exception as error:
             report.errors.append(f"{trigger.value}: not reconciled: {type(error).__name__}")
             log.error(

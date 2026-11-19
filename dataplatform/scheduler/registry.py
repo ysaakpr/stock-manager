@@ -1072,6 +1072,76 @@ OPS_GUARDIAN = Job(
 )
 
 
+#: When the owner-alert jobs were first deployed (OPS-ALERTS): a fire before it is not owed.
+OWNER_ALERTS_DEPLOYED = datetime(2026, 11, 19, 15, 0, tzinfo=IST)
+
+
+def owner_alerts(context: JobContext) -> None:
+    """The owner's plain-English alerts (OPS-ALERTS): states reconciled, fresh news sent once.
+
+    What it does: pages a kill switch tripped or reset, a book past its loss limit (drawdown from
+    its own peak, in steps) and a key dataset more than N sessions old, onset and clear once each;
+    and sends, once per key, a paper book's activity after its session, the M17 nightly summary, a
+    degraded night and a one-session drop. See `dataplatform.owner_alerts`.
+    What it assumes: the injected clock and settings are the run's (B10), migrated through 0027.
+    What it never does: write anything but `alert_condition`, fetch anything, or mention LLM cost.
+    """
+    from dataplatform.owner_alerts import run_owner_alerts_job
+
+    run_owner_alerts_job(context)
+
+
+#: Every 15 minutes: Postgres reads, a few lake partitions and the kill-switch files, no network
+#: beyond the alert itself. The paper session (21:45) and the M17 desk (22:00) are reported on the
+#: first tick after each records its session.
+OWNER_ALERTS = Job(
+    name="owner_alerts",
+    cron="*/15 * * * *",
+    fn=owner_alerts,
+    timeout=timedelta(minutes=5),
+    description="Owner alerts: kill switch, loss limits, stale data, book activity, M17 night",
+    registered_at=OWNER_ALERTS_DEPLOYED,
+)
+
+
+def owner_morning_summary(context: JobContext) -> None:
+    """The owner's 08:00 summary (OPS-ALERTS); its daily arrival proves the alert path works.
+
+    Sent even when a part could not be read (the message says which); the run then fails so
+    `failure_alerts` names what broke. See `dataplatform.owner_alerts.run_morning_summary`.
+    """
+    from dataplatform.owner_alerts import run_morning_summary_job
+
+    run_morning_summary_job(context)
+
+
+OWNER_MORNING_SUMMARY = Job(
+    name="owner_morning_summary",
+    cron="0 8 * * *",
+    fn=owner_morning_summary,
+    timeout=timedelta(minutes=10),
+    description="Owner's 08:00 summary: jobs, M17 night, books, open alerts, disk (OPS-ALERTS)",
+    registered_at=OWNER_ALERTS_DEPLOYED,
+)
+
+
+def owner_weekly_decisions(context: JobContext) -> None:
+    """Monday 09:00: the decisions waiting on the owner, from the box-local list (OPS-ALERTS)."""
+    from dataplatform.owner_alerts import run_weekly_decisions_job
+
+    run_weekly_decisions_job(context)
+
+
+OWNER_WEEKLY_DECISIONS = Job(
+    name="owner_weekly_decisions",
+    cron="0 9 * * mon",
+    fn=owner_weekly_decisions,
+    timeout=timedelta(minutes=5),
+    description="Owner's Monday list of decisions waiting (OPS-ALERTS)",
+    registered_at=OWNER_ALERTS_DEPLOYED,
+)
+
+
 def paper_session(context: JobContext) -> None:
     """The daily paper-trading session (M13.1): one session of each paper book, D13 first.
 
@@ -1441,6 +1511,9 @@ def default_registry() -> JobRegistry:
             NEWS_CAPTURE,
             FAILURE_ALERTS,
             OPS_GUARDIAN,
+            OWNER_ALERTS,
+            OWNER_MORNING_SUMMARY,
+            OWNER_WEEKLY_DECISIONS,
             PAPER_SESSION,
             M17_FUND_MANAGERS,
             FUNDAMENTALS_FORWARD,
