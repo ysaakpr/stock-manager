@@ -520,7 +520,8 @@ def test_the_e_f1_requeue_is_the_one_raised_list_and_cannot_request() -> None:
     assert len(items) == 205 == rq.RAISED_BOUNDS[E_F1]
     assert all(i.reuse_only and i.action is rq.RequeueAction.REFETCH for i in items)
     assert all(i.index_ref[0] == "nse_integrated_filing_index" for i in items)
-    assert set(rq.RAISED_BOUNDS) == {E_F1, OWNER_RULINGS}  # no standing allowance
+    # no standing allowance: each raised bound is one owner-approved list
+    assert set(rq.RAISED_BOUNDS) == {E_F1, OWNER_RULINGS, "xbrl-f2-renames-2026-11-20"}
     # Not before Tuesday's run: the forward job of Tue 3 Nov 02:00 IST is the first to owe it.
     due_mon = rq.pending_items(cast(Any, _Conn([])), date(2026, 11, 2))
     due_tue = rq.pending_items(cast(Any, _Conn([])), date(2026, 11, 3))

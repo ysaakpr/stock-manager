@@ -101,6 +101,22 @@ Added for the owner's rulings of 2026-11-02 (`tests/unit/test_xbrl_owner_rulings
 | `INTEGRATED_FILING_INDAS_1423539_…23042025110233_WEB.xml` | ASTEC | Class A, refused: OneD is a genuine second half-year (FourD minus two quarters). |
 | `INTEGRATED_FILING_NBFC_INDAS_1689424_…08072026062603_WEB.xml` | INDBANK | Class G exception: states `INE841801017` for `INE841B01017` (B→8), symbol and BSE code its own. |
 
+## `f2/` — owner ruling D44 (2026-11-16): renames D2's history does not record
+
+Copied byte-for-byte from production L0 on 2026-11-19 (`tests/unit/test_xbrl_f2_renames.py`).
+The index file is a slice of the stored legacy chunk of the same name: its three records are
+verbatim, only the selection is ours.
+
+| File | Index entry | What it pins |
+|---|---|---|
+| `corporates-financial-results_Quarterly_20200701_20200930.json` | SEPC 1091297/1091298, one other | A legacy results-index page a reuse-only re-queue item is re-read from. |
+| `INDAS_61151_314900_09092020053421_WEB.xml` | SEPC 1091297 | States `SHRIRAMEPC`; D2 holds no such window for INE964H01014. Accepted only on NSE's session statement. |
+| `INDAS_61152_314905_09092020053712_WEB.xml` | SEPC 1091298 | The consolidated sibling, same shape. |
+| `INDAS_69687_446036_06052021105028_WEB.xml` | ESSENTIA 1107015 | States `INTEGRA`, which NSE's bhavcopy does not list: stays refused, saying why. |
+| `INDAS_DEBT_647_854550_27052023110003_WEB.xml` | MOTHERSON 974 | Every identifier blank: states no symbol, proves nothing. |
+| `INDAS_35436_10399_22052018123437_WEB.xml` | DVL 1041285 | DTIL filed under Dhunseri Ventures (D37): D2 holds DTIL for that ISIN until 2010, so the session is never asked and D37's text is unchanged. |
+| `INTEGRATED_FILING_INDAS_1498822_31072025011108_WEB.xml` | GILLETTE IF107633 | Class G: states P&G Hygiene's ISIN; no session statement changes that. |
+
 ## Availability, and the real depth of this dataset
 
 Probing the whole window (index requests only) found 135,197 announcements over ten financial

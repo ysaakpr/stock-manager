@@ -25,6 +25,12 @@ What makes it bounded, one-time and journaled:
   an operator reads to see what the re-check found. It is append-only by use: nothing updates or
   deletes a row.
 
+Two index eras. An item names the stored index page its entry is re-read from: a page of the
+integrated feed (`IF<seq>[-FY]` units, 2025-03 on, the feed the forward job drives) or — in a
+`reuse_only` re-queue only — a chunk of the legacy results index (`corporates-financial-results`,
+numeric units, the 2016-2024 campaign), whose documents are all already in L0. A legacy item can
+therefore never make a request either; the era of the page and the unit must agree.
+
 Two actions. `refetch` drives the filing through the runner's normal per-filing path — reuse what
 L0 holds, re-download a stored document that is empty or truncated beside it, parse, publish or
 fail — so the outcome is exactly what a nightly retry would have produced. `record_evidence` makes
@@ -36,6 +42,7 @@ accepted deviation matches, for failures recorded before the runner started writ
 
 from __future__ import annotations
 
+import re
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from datetime import date
@@ -89,15 +96,28 @@ RAISED_BOUNDS: Final = MappingProxyType(
         # 2026-11-02 (owner): the class-A Q4 relabels that pass the FY-minus-9M check (121) and
         # INDBANK's one-character ISIN typo (1), re-parsed from their complete L0 documents once.
         "xbrl-owner-rulings-2026-11-03": 122,
+        # 2026-11-16 (owner, D44): the class F2 renames (89 legacy results-index filings), each
+        # re-parsed once from its complete L0 document; a rename NSE's bhavcopy of the filing's
+        # session proves publishes, the rest re-record why not. Reuse-only: no request.
+        "xbrl-f2-renames-2026-11-20": 89,
     }
 )
 
-#: The only index whose pages an item may be re-read from: the integrated feed (2025-03 on), the one
+#: The index an item's page is re-read from by default: the integrated feed (2025-03 on), the one
 #: the forward job drives. Its entries are what the runner's per-filing path takes.
 _INDEX_SOURCE: Final = "nse_integrated_filing_index"
+#: The legacy results index (2016-2024), whose units are the feed's numeric sequence ids. Its pages
+#: are re-read by a `reuse_only` re-queue only: those filings are not the forward job's to fetch.
+_LEGACY_INDEX_SOURCE: Final = "nse_financial_results_index"
 _FILING_SOURCE: Final = "nse_xbrl_filing"
 _ID: Final = r"^[a-z0-9][a-z0-9-]{2,79}$"
-_UNIT: Final = r"^IF\d+(?:-FY)?$"
+_INTEGRATED_UNIT: Final = re.compile(r"^IF\d+(?:-FY)?$")
+_LEGACY_UNIT: Final = re.compile(r"^\d+$")
+_UNIT: Final = r"^(?:IF\d+(?:-FY)?|\d+)$"
+#: A stored legacy chunk's name: `corporates-financial-results_<Period>_<from>_<to>.json`.
+_LEGACY_PAGE: Final = re.compile(
+    r"^corporates-financial-results_(Quarterly|Annual)_\d{8}_\d{8}\.json$"
+)
 
 
 class RequeueError(ValueError):
@@ -130,7 +150,9 @@ class _Strict(BaseModel):
 
 
 class _Filing(_Strict):
-    unit: str = Field(pattern=_UNIT, description="the nse_xbrl_filing unit: IF<seq>[-FY]")
+    unit: str = Field(
+        pattern=_UNIT, description="the nse_xbrl_filing unit: IF<seq>[-FY], or a legacy <seq>"
+    )
     filing_date: date
     index: str = Field(
         min_length=1, description="the L0 key of the index page holding its entry: source/date/name"
@@ -141,10 +163,33 @@ class _Filing(_Strict):
     def _index_key(self) -> _Filing:
         source, _, rest = self.index.partition("/")
         day, _, filename = rest.partition("/")
-        if source != _INDEX_SOURCE or not filename or "/" in filename:
-            raise ValueError(f"index {self.index!r} is not {_INDEX_SOURCE}/<YYYY-MM-DD>/<file>")
+        if source not in (_INDEX_SOURCE, _LEGACY_INDEX_SOURCE) or not filename or "/" in filename:
+            raise ValueError(
+                f"index {self.index!r} is not {_INDEX_SOURCE}/<YYYY-MM-DD>/<file> or "
+                f"{_LEGACY_INDEX_SOURCE}/<YYYY-MM-DD>/<file>"
+            )
         date.fromisoformat(day)
+        if source == _LEGACY_INDEX_SOURCE:
+            if not _LEGACY_UNIT.fullmatch(self.unit):
+                raise ValueError(
+                    f"unit {self.unit} is not a legacy results-index unit, but its index "
+                    f"{self.index!r} is a {_LEGACY_INDEX_SOURCE} page"
+                )
+            if not _LEGACY_PAGE.fullmatch(filename):
+                raise ValueError(
+                    f"index {self.index!r} is not a stored corporates-financial-results chunk"
+                )
+        elif not _INTEGRATED_UNIT.fullmatch(self.unit):
+            raise ValueError(
+                f"unit {self.unit} is not an integrated-feed unit, but its index {self.index!r} "
+                f"is a {_INDEX_SOURCE} page"
+            )
         return self
+
+    @property
+    def legacy(self) -> bool:
+        """Whether its entry is re-read from a legacy results-index chunk."""
+        return self.index.startswith(f"{_LEGACY_INDEX_SOURCE}/")
 
 
 class _Requeue(_Strict):
@@ -174,6 +219,11 @@ class _Requeue(_Strict):
             raise ValueError(
                 f"re-queue {self.id} has a raised bound but is not reuse_only; a raised bound is "
                 "for a list that cannot make a request"
+            )
+        if not self.reuse_only and any(f.legacy for f in self.filings):
+            raise ValueError(
+                f"re-queue {self.id} names a legacy results-index filing but is not reuse_only; "
+                "the legacy campaign's documents are re-parsed from L0, never fetched again"
             )
         bound = RAISED_BOUNDS.get(self.id, MAX_FILINGS)
         if len(self.filings) > bound:
@@ -223,6 +273,17 @@ class RequeueItem:
         source, rest = self.index_key.split("/", 1)
         day, filename = rest.split("/", 1)
         return source, date.fromisoformat(day), filename
+
+    @property
+    def legacy(self) -> bool:
+        """Whether the page is a legacy results-index chunk (`nse_financial_results_index`)."""
+        return self.index_key.startswith(f"{_LEGACY_INDEX_SOURCE}/")
+
+    @property
+    def legacy_period(self) -> str | None:
+        """`Quarterly`/`Annual` from a legacy chunk's name; None for an integrated page."""
+        found = _LEGACY_PAGE.fullmatch(self.index_ref[2]) if self.legacy else None
+        return None if found is None else found.group(1)
 
 
 def load_requeues(path: Path = REQUEUE_PATH) -> tuple[RequeueItem, ...]:

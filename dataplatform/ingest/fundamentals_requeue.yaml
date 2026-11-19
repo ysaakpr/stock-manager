@@ -15,6 +15,9 @@
 #
 # Each filing names its sync_state unit, its filing (logical) date, and the L0 key of the stored
 # index page its entry is re-read from (source/logical_date/filename) — no index request is made.
+# An integrated-feed unit (IF<seq>[-FY]) names an nse_integrated_filing_index page; a legacy
+# results-index unit (numeric, 2016-2024) names an nse_financial_results_index chunk and may appear
+# only in a reuse_only re-queue (quote it: unit: "1042910").
 # Bounded: at most 50 filings a re-queue, 100 in the file — except a reuse_only re-queue whose id
 # the owner approved a raised bound for in fundamentals_requeue.RAISED_BOUNDS, which counts against
 # that bound alone. Public repository: no secret, no host.
@@ -434,3 +437,109 @@ requeues:
       - {unit: IF164242, filing_date: 2026-05-29, index: nse_integrated_filing_index/2026-05-01/integrated-filing-results_20260501_20260531_p01.json, note: "A INTENTECH Cons; 2026-01-01..2026-03-31"}
       - {unit: IF164414, filing_date: 2026-05-29, index: nse_integrated_filing_index/2026-05-01/integrated-filing-results_20260501_20260531_p01.json, note: "A GLENMARK Stan; 2026-01-01..2026-03-31"}
       - {unit: IF173185, filing_date: 2026-07-08, index: nse_integrated_filing_index/2026-07-01/integrated-filing-results_20260701_20260731_p02.json, note: "G INDBANK; INE841801017 for INE841B01017"}
+
+  # Owner ruling D44, 2026-11-16 (M14.3), class F2: a company renamed without a D2 symbol-change
+  # record — the document states its old symbol (SHRIRAMEPC, WABCOINDIA, RUCHI, DALALSTCOM,
+  # BURGERKING, INTEGRA) under an index entry that now says SEPC, ZFCVINDIA, PATANJALI, KEEPLEARN,
+  # RBA, ESSENTIA; and one MOTHERSON document states a blank symbol. A rename is accepted only when
+  # NSE's own bhavcopy of the last session on or before the filing date lists the document's symbol
+  # under exactly the entry's ISIN and no other (`fundamentals_backfill.rename_evidence_of`); the
+  # document is then stored with its own stated values. All 89 are legacy results-index filings
+  # (2018-2023), re-read from their stored index chunk and re-parsed from their complete L0
+  # documents: reuse_only, no request, raised bound 89. The ones the bhavcopy cannot prove (offline
+  # 2026-11-19: 7 DALALSTCOM, 5 INTEGRA, the blank MOTHERSON) are driven once and re-record why.
+  - id: xbrl-f2-renames-2026-11-20
+    action: refetch
+    reuse_only: true
+    not_before: 2026-11-20
+    basis: "HUMAN_DECISIONS.md D44 (owner, 2026-11-16): accept the F2 renames on D2 identity evidence"
+    filings:
+      - {unit: "1045991", filing_date: 2018-07-02, index: nse_financial_results_index/2018-07-01/corporates-financial-results_Quarterly_20180701_20180930.json, note: "F2 SHRIRAMEPC as SEPC Stan; 2018-01-01..2018-03-31"}
+      - {unit: "1045992", filing_date: 2018-07-02, index: nse_financial_results_index/2018-07-01/corporates-financial-results_Quarterly_20180701_20180930.json, note: "F2 SHRIRAMEPC as SEPC Stan; 2017-01-01..2017-03-31"}
+      - {unit: "1045993", filing_date: 2018-07-02, index: nse_financial_results_index/2018-07-01/corporates-financial-results_Annual_20180701_20180930.json, note: "F2 SHRIRAMEPC as SEPC Stan; 2017-04-01..2018-03-31"}
+      - {unit: "1045994", filing_date: 2018-07-02, index: nse_financial_results_index/2018-07-01/corporates-financial-results_Annual_20180701_20180930.json, note: "F2 SHRIRAMEPC as SEPC Stan; 2016-04-01..2017-03-31"}
+      - {unit: "1045995", filing_date: 2018-07-02, index: nse_financial_results_index/2018-07-01/corporates-financial-results_Quarterly_20180701_20180930.json, note: "F2 SHRIRAMEPC as SEPC Cons; 2018-01-01..2018-03-31"}
+      - {unit: "1045996", filing_date: 2018-07-02, index: nse_financial_results_index/2018-07-01/corporates-financial-results_Quarterly_20180701_20180930.json, note: "F2 SHRIRAMEPC as SEPC Cons; 2017-01-01..2017-03-31"}
+      - {unit: "1045997", filing_date: 2018-07-02, index: nse_financial_results_index/2018-07-01/corporates-financial-results_Annual_20180701_20180930.json, note: "F2 SHRIRAMEPC as SEPC Cons; 2017-04-01..2018-03-31"}
+      - {unit: "1045998", filing_date: 2018-07-02, index: nse_financial_results_index/2018-07-01/corporates-financial-results_Annual_20180701_20180930.json, note: "F2 SHRIRAMEPC as SEPC Cons; 2016-04-01..2017-03-31"}
+      - {unit: "1052640", filing_date: 2018-11-22, index: nse_financial_results_index/2018-10-01/corporates-financial-results_Quarterly_20181001_20181231.json, note: "F2 SHRIRAMEPC as SEPC Stan; 2018-07-01..2018-09-30"}
+      - {unit: "1052642", filing_date: 2018-11-22, index: nse_financial_results_index/2018-10-01/corporates-financial-results_Quarterly_20181001_20181231.json, note: "F2 SHRIRAMEPC as SEPC Cons; 2018-07-01..2018-09-30"}
+      - {unit: "1056555", filing_date: 2019-02-20, index: nse_financial_results_index/2019-01-01/corporates-financial-results_Quarterly_20190101_20190331.json, note: "F2 SHRIRAMEPC as SEPC Stan; 2018-10-01..2018-12-31"}
+      - {unit: "1056557", filing_date: 2019-02-20, index: nse_financial_results_index/2019-01-01/corporates-financial-results_Quarterly_20190101_20190331.json, note: "F2 SHRIRAMEPC as SEPC Cons; 2018-10-01..2018-12-31"}
+      - {unit: "1073937", filing_date: 2019-11-18, index: nse_financial_results_index/2019-10-01/corporates-financial-results_Quarterly_20191001_20191231.json, note: "F2 SHRIRAMEPC as SEPC Stan; 2019-07-01..2019-09-30"}
+      - {unit: "1073939", filing_date: 2019-11-18, index: nse_financial_results_index/2019-10-01/corporates-financial-results_Quarterly_20191001_20191231.json, note: "F2 SHRIRAMEPC as SEPC Cons; 2019-07-01..2019-09-30"}
+      - {unit: "1079300", filing_date: 2020-02-13, index: nse_financial_results_index/2020-01-01/corporates-financial-results_Quarterly_20200101_20200331.json, note: "F2 SHRIRAMEPC as SEPC Stan; 2019-10-01..2019-12-31"}
+      - {unit: "1079304", filing_date: 2020-02-13, index: nse_financial_results_index/2020-01-01/corporates-financial-results_Quarterly_20200101_20200331.json, note: "F2 SHRIRAMEPC as SEPC Cons; 2019-10-01..2019-12-31"}
+      - {unit: "1084339", filing_date: 2020-06-25, index: nse_financial_results_index/2020-04-01/corporates-financial-results_Quarterly_20200401_20200630.json, note: "F2 SHRIRAMEPC as SEPC Stan; 2020-01-01..2020-03-31"}
+      - {unit: "1084340", filing_date: 2020-06-25, index: nse_financial_results_index/2020-04-01/corporates-financial-results_Annual_20200401_20200630.json, note: "F2 SHRIRAMEPC as SEPC Stan; 2019-04-01..2020-03-31"}
+      - {unit: "1084349", filing_date: 2020-06-25, index: nse_financial_results_index/2020-04-01/corporates-financial-results_Quarterly_20200401_20200630.json, note: "F2 SHRIRAMEPC as SEPC Cons; 2020-01-01..2020-03-31"}
+      - {unit: "1084350", filing_date: 2020-06-25, index: nse_financial_results_index/2020-04-01/corporates-financial-results_Annual_20200401_20200630.json, note: "F2 SHRIRAMEPC as SEPC Cons; 2019-04-01..2020-03-31"}
+      - {unit: "1091297", filing_date: 2020-09-09, index: nse_financial_results_index/2020-07-01/corporates-financial-results_Quarterly_20200701_20200930.json, note: "F2 SHRIRAMEPC as SEPC Stan; 2020-04-01..2020-06-30"}
+      - {unit: "1091298", filing_date: 2020-09-09, index: nse_financial_results_index/2020-07-01/corporates-financial-results_Quarterly_20200701_20200930.json, note: "F2 SHRIRAMEPC as SEPC Cons; 2020-04-01..2020-06-30"}
+      - {unit: "1098698", filing_date: 2020-11-13, index: nse_financial_results_index/2020-10-01/corporates-financial-results_Quarterly_20201001_20201231.json, note: "F2 SHRIRAMEPC as SEPC Stan; 2020-07-01..2020-09-30"}
+      - {unit: "1098710", filing_date: 2020-11-13, index: nse_financial_results_index/2020-10-01/corporates-financial-results_Quarterly_20201001_20201231.json, note: "F2 SHRIRAMEPC as SEPC Cons; 2020-07-01..2020-09-30"}
+      - {unit: "1105581", filing_date: 2021-02-13, index: nse_financial_results_index/2021-01-01/corporates-financial-results_Quarterly_20210101_20210331.json, note: "F2 SHRIRAMEPC as SEPC Stan; 2020-10-01..2020-12-31"}
+      - {unit: "1105589", filing_date: 2021-02-13, index: nse_financial_results_index/2021-01-01/corporates-financial-results_Quarterly_20210101_20210331.json, note: "F2 SHRIRAMEPC as SEPC Cons; 2020-10-01..2020-12-31"}
+      - {unit: "1112318", filing_date: 2021-06-30, index: nse_financial_results_index/2021-04-01/corporates-financial-results_Quarterly_20210401_20210630.json, note: "F2 SHRIRAMEPC as SEPC Stan; 2021-01-01..2021-03-31"}
+      - {unit: "1112319", filing_date: 2021-06-30, index: nse_financial_results_index/2021-04-01/corporates-financial-results_Annual_20210401_20210630.json, note: "F2 SHRIRAMEPC as SEPC Stan; 2020-04-01..2021-03-31"}
+      - {unit: "1116203", filing_date: 2021-08-13, index: nse_financial_results_index/2021-07-01/corporates-financial-results_Quarterly_20210701_20210930.json, note: "F2 SHRIRAMEPC as SEPC Stan; 2021-04-01..2021-06-30"}
+      - {unit: "1116207", filing_date: 2021-08-13, index: nse_financial_results_index/2021-07-01/corporates-financial-results_Quarterly_20210701_20210930.json, note: "F2 SHRIRAMEPC as SEPC Cons; 2021-04-01..2021-06-30"}
+      - {unit: "1122512", filing_date: 2021-11-13, index: nse_financial_results_index/2021-10-01/corporates-financial-results_Quarterly_20211001_20211231.json, note: "F2 SHRIRAMEPC as SEPC Stan; 2021-07-01..2021-09-30"}
+      - {unit: "1122516", filing_date: 2021-11-13, index: nse_financial_results_index/2021-10-01/corporates-financial-results_Quarterly_20211001_20211231.json, note: "F2 SHRIRAMEPC as SEPC Cons; 2021-07-01..2021-09-30"}
+      - {unit: "1128926", filing_date: 2022-02-12, index: nse_financial_results_index/2022-01-01/corporates-financial-results_Quarterly_20220101_20220331.json, note: "F2 SHRIRAMEPC as SEPC Stan; 2021-10-01..2021-12-31"}
+      - {unit: "1128934", filing_date: 2022-02-12, index: nse_financial_results_index/2022-01-01/corporates-financial-results_Quarterly_20220101_20220331.json, note: "F2 SHRIRAMEPC as SEPC Cons; 2021-10-01..2021-12-31"}
+      - {unit: "1042910", filing_date: 2018-06-21, index: nse_financial_results_index/2018-04-01/corporates-financial-results_Quarterly_20180401_20180630.json, note: "F2 WABCOINDIA as ZFCVINDIA Stan; 2018-01-01..2018-03-31"}
+      - {unit: "1042911", filing_date: 2018-06-21, index: nse_financial_results_index/2018-04-01/corporates-financial-results_Annual_20180401_20180630.json, note: "F2 WABCOINDIA as ZFCVINDIA Stan; 2017-04-01..2018-03-31"}
+      - {unit: "1047062", filing_date: 2018-08-03, index: nse_financial_results_index/2018-07-01/corporates-financial-results_Quarterly_20180701_20180930.json, note: "F2 WABCOINDIA as ZFCVINDIA Stan; 2018-04-01..2018-06-30"}
+      - {unit: "1051888", filing_date: 2018-11-21, index: nse_financial_results_index/2018-10-01/corporates-financial-results_Quarterly_20181001_20181231.json, note: "F2 WABCOINDIA as ZFCVINDIA Stan; 2018-07-01..2018-09-30"}
+      - {unit: "1055229", filing_date: 2019-01-31, index: nse_financial_results_index/2019-01-01/corporates-financial-results_Quarterly_20190101_20190331.json, note: "F2 WABCOINDIA as ZFCVINDIA Stan; 2018-10-01..2018-12-31"}
+      - {unit: "1062166", filing_date: 2019-05-27, index: nse_financial_results_index/2019-04-01/corporates-financial-results_Quarterly_20190401_20190630.json, note: "F2 WABCOINDIA as ZFCVINDIA Stan; 2019-01-01..2019-03-31"}
+      - {unit: "1062167", filing_date: 2019-05-27, index: nse_financial_results_index/2019-04-01/corporates-financial-results_Annual_20190401_20190630.json, note: "F2 WABCOINDIA as ZFCVINDIA Stan; 2018-04-01..2019-03-31"}
+      - {unit: "1067715", filing_date: 2019-08-14, index: nse_financial_results_index/2019-07-01/corporates-financial-results_Quarterly_20190701_20190930.json, note: "F2 WABCOINDIA as ZFCVINDIA Stan; 2019-04-01..2019-06-30"}
+      - {unit: "1067716", filing_date: 2019-08-14, index: nse_financial_results_index/2019-07-01/corporates-financial-results_Quarterly_20190701_20190930.json, note: "F2 WABCOINDIA as ZFCVINDIA Stan; 2019-01-01..2019-03-31"}
+      - {unit: "1070313", filing_date: 2019-11-06, index: nse_financial_results_index/2019-10-01/corporates-financial-results_Quarterly_20191001_20191231.json, note: "F2 WABCOINDIA as ZFCVINDIA Stan; 2019-07-01..2019-09-30"}
+      - {unit: "1075378", filing_date: 2020-01-30, index: nse_financial_results_index/2020-01-01/corporates-financial-results_Quarterly_20200101_20200331.json, note: "F2 WABCOINDIA as ZFCVINDIA Stan; 2019-10-01..2019-12-31"}
+      - {unit: "1082102", filing_date: 2020-05-23, index: nse_financial_results_index/2020-04-01/corporates-financial-results_Quarterly_20200401_20200630.json, note: "F2 WABCOINDIA as ZFCVINDIA Stan; 2020-01-01..2020-03-31"}
+      - {unit: "1082103", filing_date: 2020-05-23, index: nse_financial_results_index/2020-04-01/corporates-financial-results_Annual_20200401_20200630.json, note: "F2 WABCOINDIA as ZFCVINDIA Stan; 2019-04-01..2020-03-31"}
+      - {unit: "1090110", filing_date: 2020-08-13, index: nse_financial_results_index/2020-07-01/corporates-financial-results_Quarterly_20200701_20200930.json, note: "F2 WABCOINDIA as ZFCVINDIA Stan; 2020-04-01..2020-06-30"}
+      - {unit: "1104386", filing_date: 2021-02-12, index: nse_financial_results_index/2021-01-01/corporates-financial-results_Quarterly_20210101_20210331.json, note: "F2 WABCOINDIA as ZFCVINDIA Stan; 2020-10-01..2020-12-31"}
+      - {unit: "1104582", filing_date: 2021-02-12, index: nse_financial_results_index/2021-01-01/corporates-financial-results_Quarterly_20210101_20210331.json, note: "F2 WABCOINDIA as ZFCVINDIA Stan; 2020-07-01..2020-09-30"}
+      - {unit: "1107747", filing_date: 2021-05-17, index: nse_financial_results_index/2021-04-01/corporates-financial-results_Quarterly_20210401_20210630.json, note: "F2 WABCOINDIA as ZFCVINDIA Stan; 2021-01-01..2021-03-31"}
+      - {unit: "1107748", filing_date: 2021-05-17, index: nse_financial_results_index/2021-04-01/corporates-financial-results_Annual_20210401_20210630.json, note: "F2 WABCOINDIA as ZFCVINDIA Stan; 2020-04-01..2021-03-31"}
+      - {unit: "1114316", filing_date: 2021-07-29, index: nse_financial_results_index/2021-07-01/corporates-financial-results_Quarterly_20210701_20210930.json, note: "F2 WABCOINDIA as ZFCVINDIA Stan; 2021-04-01..2021-06-30"}
+      - {unit: "1120296", filing_date: 2021-11-09, index: nse_financial_results_index/2021-10-01/corporates-financial-results_Quarterly_20211001_20211231.json, note: "F2 WABCOINDIA as ZFCVINDIA Stan; 2021-07-01..2021-09-30"}
+      - {unit: "1125222", filing_date: 2022-01-28, index: nse_financial_results_index/2022-01-01/corporates-financial-results_Quarterly_20220101_20220331.json, note: "F2 WABCOINDIA as ZFCVINDIA Stan; 2021-10-01..2021-12-31"}
+      - {unit: "1080844", filing_date: 2020-02-15, index: nse_financial_results_index/2020-01-01/corporates-financial-results_Quarterly_20200101_20200331.json, note: "F2 RUCHI as PATANJALI Stan; 2019-10-01..2019-12-31"}
+      - {unit: "1085045", filing_date: 2020-06-27, index: nse_financial_results_index/2020-04-01/corporates-financial-results_Quarterly_20200401_20200630.json, note: "F2 RUCHI as PATANJALI Stan; 2020-01-01..2020-03-31"}
+      - {unit: "1085046", filing_date: 2020-06-27, index: nse_financial_results_index/2020-04-01/corporates-financial-results_Annual_20200401_20200630.json, note: "F2 RUCHI as PATANJALI Stan; 2019-04-01..2020-03-31"}
+      - {unit: "1090600", filing_date: 2020-08-19, index: nse_financial_results_index/2020-07-01/corporates-financial-results_Quarterly_20200701_20200930.json, note: "F2 RUCHI as PATANJALI Stan; 2020-04-01..2020-06-30"}
+      - {unit: "1096937", filing_date: 2020-11-12, index: nse_financial_results_index/2020-10-01/corporates-financial-results_Quarterly_20201001_20201231.json, note: "F2 RUCHI as PATANJALI Stan; 2020-07-01..2020-09-30"}
+      - {unit: "1103550", filing_date: 2021-02-11, index: nse_financial_results_index/2021-01-01/corporates-financial-results_Quarterly_20210101_20210331.json, note: "F2 RUCHI as PATANJALI Stan; 2020-10-01..2020-12-31"}
+      - {unit: "1112346", filing_date: 2021-06-30, index: nse_financial_results_index/2021-04-01/corporates-financial-results_Quarterly_20210401_20210630.json, note: "F2 RUCHI as PATANJALI Stan; 2021-01-01..2021-03-31"}
+      - {unit: "1112347", filing_date: 2021-06-30, index: nse_financial_results_index/2021-04-01/corporates-financial-results_Annual_20210401_20210630.json, note: "F2 RUCHI as PATANJALI Stan; 2020-04-01..2021-03-31"}
+      - {unit: "1116647", filing_date: 2021-08-14, index: nse_financial_results_index/2021-07-01/corporates-financial-results_Quarterly_20210701_20210930.json, note: "F2 RUCHI as PATANJALI Stan; 2021-04-01..2021-06-30"}
+      - {unit: "1123650", filing_date: 2021-11-15, index: nse_financial_results_index/2021-10-01/corporates-financial-results_Quarterly_20211001_20211231.json, note: "F2 RUCHI as PATANJALI Stan; 2021-07-01..2021-09-30"}
+      - {unit: "1129612", filing_date: 2022-02-14, index: nse_financial_results_index/2022-01-01/corporates-financial-results_Quarterly_20220101_20220331.json, note: "F2 RUCHI as PATANJALI Stan; 2021-10-01..2021-12-31"}
+      - {unit: "1135297", filing_date: 2022-05-27, index: nse_financial_results_index/2022-04-01/corporates-financial-results_Quarterly_20220401_20220630.json, note: "F2 RUCHI as PATANJALI Stan; 2022-01-01..2022-03-31"}
+      - {unit: "1135298", filing_date: 2022-05-27, index: nse_financial_results_index/2022-04-01/corporates-financial-results_Annual_20220401_20220630.json, note: "F2 RUCHI as PATANJALI Stan; 2021-04-01..2022-03-31"}
+      - {unit: "1089072", filing_date: 2020-08-01, index: nse_financial_results_index/2020-07-01/corporates-financial-results_Quarterly_20200701_20200930.json, note: "F2 DALALSTCOM as KEEPLEARN Stan; 2020-01-01..2020-03-31"}
+      - {unit: "1089073", filing_date: 2020-08-01, index: nse_financial_results_index/2020-07-01/corporates-financial-results_Annual_20200701_20200930.json, note: "F2 DALALSTCOM as KEEPLEARN Stan; 2019-04-01..2020-03-31"}
+      - {unit: "1091523", filing_date: 2020-09-12, index: nse_financial_results_index/2020-07-01/corporates-financial-results_Quarterly_20200701_20200930.json, note: "F2 DALALSTCOM as KEEPLEARN Stan; 2020-04-01..2020-06-30"}
+      - {unit: "1097955", filing_date: 2020-11-13, index: nse_financial_results_index/2020-10-01/corporates-financial-results_Quarterly_20201001_20201231.json, note: "F2 DALALSTCOM as KEEPLEARN Stan; 2020-07-01..2020-09-30"}
+      - {unit: "1104998", filing_date: 2021-02-12, index: nse_financial_results_index/2021-01-01/corporates-financial-results_Quarterly_20210101_20210331.json, note: "F2 DALALSTCOM as KEEPLEARN Stan; 2020-10-01..2020-12-31"}
+      - {unit: "1110412", filing_date: 2021-06-17, index: nse_financial_results_index/2021-04-01/corporates-financial-results_Quarterly_20210401_20210630.json, note: "F2 DALALSTCOM as KEEPLEARN Stan; 2021-01-01..2021-03-31"}
+      - {unit: "1110413", filing_date: 2021-06-17, index: nse_financial_results_index/2021-04-01/corporates-financial-results_Annual_20210401_20210630.json, note: "F2 DALALSTCOM as KEEPLEARN Stan; 2020-04-01..2021-03-31"}
+      - {unit: "1116815", filing_date: 2021-08-14, index: nse_financial_results_index/2021-07-01/corporates-financial-results_Quarterly_20210701_20210930.json, note: "F2 DALALSTCOM as KEEPLEARN Stan; 2021-04-01..2021-06-30"}
+      - {unit: "1122415", filing_date: 2021-11-13, index: nse_financial_results_index/2021-10-01/corporates-financial-results_Quarterly_20211001_20211231.json, note: "F2 DALALSTCOM as KEEPLEARN Stan; 2021-07-01..2021-09-30"}
+      - {unit: "1130400", filing_date: 2022-02-15, index: nse_financial_results_index/2022-01-01/corporates-financial-results_Quarterly_20220101_20220331.json, note: "F2 DALALSTCOM as KEEPLEARN Stan; 2021-10-01..2021-12-31"}
+      - {unit: "1103058", filing_date: 2021-02-10, index: nse_financial_results_index/2021-01-01/corporates-financial-results_Quarterly_20210101_20210331.json, note: "F2 BURGERKING as RBA Stan; 2020-10-01..2020-12-31"}
+      - {unit: "1108610", filing_date: 2021-05-27, index: nse_financial_results_index/2021-04-01/corporates-financial-results_Quarterly_20210401_20210630.json, note: "F2 BURGERKING as RBA Stan; 2021-01-01..2021-03-31"}
+      - {unit: "1116261", filing_date: 2021-08-13, index: nse_financial_results_index/2021-07-01/corporates-financial-results_Quarterly_20210701_20210930.json, note: "F2 BURGERKING as RBA Stan; 2021-04-01..2021-06-30"}
+      - {unit: "1122278", filing_date: 2021-11-12, index: nse_financial_results_index/2021-10-01/corporates-financial-results_Quarterly_20211001_20211231.json, note: "F2 BURGERKING as RBA Stan; 2021-07-01..2021-09-30"}
+      - {unit: "1124844", filing_date: 2022-01-24, index: nse_financial_results_index/2022-01-01/corporates-financial-results_Quarterly_20220101_20220331.json, note: "F2 BURGERKING as RBA Stan; 2021-10-01..2021-12-31"}
+      - {unit: "1107015", filing_date: 2021-05-06, index: nse_financial_results_index/2021-04-01/corporates-financial-results_Quarterly_20210401_20210630.json, note: "F2 INTEGRA as ESSENTIA Stan; 2021-01-01..2021-03-31"}
+      - {unit: "1107016", filing_date: 2021-05-06, index: nse_financial_results_index/2021-04-01/corporates-financial-results_Annual_20210401_20210630.json, note: "F2 INTEGRA as ESSENTIA Stan; 2020-04-01..2021-03-31"}
+      - {unit: "1115045", filing_date: 2021-08-07, index: nse_financial_results_index/2021-07-01/corporates-financial-results_Quarterly_20210701_20210930.json, note: "F2 INTEGRA as ESSENTIA Stan; 2021-04-01..2021-06-30"}
+      - {unit: "1120362", filing_date: 2021-11-09, index: nse_financial_results_index/2021-10-01/corporates-financial-results_Quarterly_20211001_20211231.json, note: "F2 INTEGRA as ESSENTIA Stan; 2021-07-01..2021-09-30"}
+      - {unit: "1124160", filing_date: 2022-01-12, index: nse_financial_results_index/2022-01-01/corporates-financial-results_Quarterly_20220101_20220331.json, note: "F2 INTEGRA as ESSENTIA Stan; 2021-10-01..2021-12-31"}
+      - {unit: "974", filing_date: 2023-05-27, index: nse_financial_results_index/2023-04-01/corporates-financial-results_Annual_20230401_20230630.json, note: "F2 (blank) as MOTHERSON Stan; 2022-04-01..2023-03-31"}

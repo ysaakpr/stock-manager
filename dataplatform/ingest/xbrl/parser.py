@@ -82,11 +82,34 @@ __all__ = [
     "SEGMENT_CONCEPT",
     "SOURCE_ID",
     "PayloadDefect",
+    "RenameEvidence",
+    "RenameProof",
     "parse",
     "payload_defect",
 ]
 
 _LOG = get_logger(__name__)
+
+
+@dataclass(frozen=True, slots=True)
+class RenameProof:
+    """What D2's session statement says about a document symbol D2's windows do not place.
+
+    `proven` only when NSE's own bhavcopy of the last session on or before the filing date lists
+    the symbol, in every series it traded, under exactly the entry's ISIN and no other.
+    `detail` says what was found either way: on refusal it is the reason the parser appends to its
+    `ParseError`, so a refused filing's error names why the rename could not be proven.
+    """
+
+    proven: bool
+    detail: str
+    session: date | None = None
+
+
+#: `document symbol -> RenameProof`, bound by the caller to one entry's ISIN and filing date; or
+#: `None` from it when D2 already holds a window of that symbol for the ISIN (D2's history then
+#: decides on its own, and the session statement is not asked — the DTIL refusal, D37).
+RenameEvidence = Callable[[str], "RenameProof | None"]
 
 #: The register id the point-in-time filings path serves (`source_register.yaml`, parser M7.3).
 SOURCE_ID: Final = "nse_xbrl_filing"
@@ -291,6 +314,7 @@ def parse(
     known_symbols: frozenset[str] | None = None,
     bse_codes: frozenset[str] | None = None,
     isins_near: Callable[[str], frozenset[str]] | None = None,
+    rename_evidence: RenameEvidence | None = None,
     source: str = SOURCE_ID,
     l0_key: str | None = None,
     filename: str,
@@ -325,6 +349,12 @@ def parse(
     entry's ISIN — INDBANK's `INE841801017` for `INE841B01017` — be told apart from a sister
     company's real ISIN (`_check_stated_isin`). Omitted, no such typo is accepted.
 
+    `rename_evidence` answers, for a symbol the document states that none of `known_symbols`
+    matches, whether NSE's own bhavcopy of the filing's session lists that symbol under exactly the
+    entry's ISIN (`RenameProof`) — the owner's F2 ruling (D44, 2026-11-16): a company renamed
+    without a D2 symbol-change record is recognised by the exchange's same-session statement, and
+    never by the symbol alone. Omitted, no such rename is accepted.
+
     A quarterly entry whose document offers, for that quarter's end, only a column stating the
     six months to it under a `Half Yearly` header plus the year-to-date column (class A) raises
     `q4_relabel.LabelledHalfYearError` — a `ParseError` — carrying that column built as the asked
@@ -358,6 +388,7 @@ def parse(
         accepted=accepted,
         bse_codes=bse_codes or frozenset(),
         integrated=integrated,
+        rename_evidence=rename_evidence,
         filename=filename,
     )
 
@@ -593,6 +624,7 @@ def _check_symbol(
     accepted: frozenset[str],
     bse_codes: frozenset[str],
     integrated: bool,
+    rename_evidence: RenameEvidence | None = None,
     filename: str,
 ) -> str:
     """Assert the document is about the company the index entry names, and return its symbol.
@@ -630,6 +662,16 @@ def _check_symbol(
       one), it states that ISIN and no other, and any BSE code it states is D2's for that ISIN.
       A stated ISIN that names a different company — DTIL's, a sister company's — is not this
       case and stays refused (here, and in `_check_stated_isin`).
+    * **A rename D2's history does not record** (class F2, owner ruling D44, 2026-11-16). NSE's
+      symbol-change file omits some renames — Shriram EPC filed as `SHRIRAMEPC` under an entry
+      that now says `SEPC`, and D2 holds no `SHRIRAMEPC` window for that ISIN at all. Such a
+      document is accepted only when `rename_evidence` proves it: NSE's own bhavcopy of the last
+      session on or before the filing date lists the document's one stated symbol under exactly
+      the entry's ISIN and no other (`RenameProof`). The ISIN still comes from the index; the
+      session statement only vouches that the symbol was that ISIN's that day. A document that
+      states no symbol, or several, proves nothing; a symbol D2 does hold a window of for the ISIN
+      (DTIL under Dhunseri Ventures) is D2's to decide and the statement is never asked. A refusal
+      names why the rename could not be proven.
     """
     identifiers: set[str] = set()
     schemes: set[str] = set()
@@ -698,14 +740,44 @@ def _check_symbol(
             note="the document's own ISIN is the entry's exactly; its symbol is a filer's typo",
         )
         return entry.symbol
-    raise ParseError(
+    refusal = (
         f"index says this filing is {entry.symbol!r} (ISIN {entry.isin}, symbols accepted on "
         f"{entry.filing_date.isoformat()}: {', '.join(sorted(accepted))}) but the document "
         f"says "
         f"{', '.join(sorted(stated))}; the announcements index and the XBRL must name the "
-        "same company",
-        filename=filename,
+        "same company"
     )
+    if rename_evidence is None:
+        raise ParseError(refusal, filename=filename)
+    named = sorted({symbol.strip() for symbol in stated if symbol.strip()})
+    if not named:
+        raise ParseError(
+            f"{refusal}; rename not proven: the document states no symbol (its identifier is "
+            "blank), so no exchange statement can tie it to the entry's ISIN",
+            filename=filename,
+        )
+    if len({symbol.upper() for symbol in named}) > 1:
+        raise ParseError(
+            f"{refusal}; rename not proven: the document states more than one symbol",
+            filename=filename,
+        )
+    proof = rename_evidence(named[0])
+    if proof is None:
+        raise ParseError(refusal, filename=filename)
+    if not proof.proven:
+        raise ParseError(f"{refusal}; rename not proven: {proof.detail}", filename=filename)
+    _LOG.info(
+        "xbrl.symbol_renamed_session_agrees",
+        filename=filename,
+        entry_symbol=entry.symbol,
+        entry_isin=entry.isin,
+        stated=named[0],
+        session=None if proof.session is None else proof.session.isoformat(),
+        evidence=proof.detail,
+        note="D2 holds no window of the document's symbol for this ISIN; NSE's bhavcopy of the "
+        "session lists it under exactly the entry's ISIN (owner ruling D44, 2026-11-16)",
+    )
+    return named[0]
 
 
 def _without_own_bse_code(

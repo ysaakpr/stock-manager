@@ -75,6 +75,7 @@ from contextlib import ExitStack
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
 from enum import StrEnum
+from functools import partial
 from pathlib import Path
 from types import FrameType
 from typing import Final
@@ -88,6 +89,7 @@ from dataplatform.identity.master import (
     IdentityStore,
     SymbolWindow,
 )
+from dataplatform.identity.session import SessionIdentity
 from dataplatform.ingest.calendar import (
     CalendarCoverageError,
     TradingCalendar,
@@ -109,6 +111,7 @@ from dataplatform.ingest.fundamentals_requeue import (
 )
 from dataplatform.ingest.lease import HostBusyError
 from dataplatform.ingest.models import ParseError
+from dataplatform.ingest.pr_bundle_l1 import load_session_identity
 from dataplatform.ingest.source_register import SourceRegister
 from dataplatform.ingest.source_register import load as load_register
 from dataplatform.ingest.xbrl import discovery, half_year, integrated, parser, q4_relabel
@@ -146,8 +149,10 @@ __all__ = [
     "isins_in_price_window",
     "isins_near_of",
     "main",
+    "rename_evidence_of",
     "render_report",
     "resolve_universe",
+    "session_loader",
     "symbols_accepted_on",
     "try_resolve_unambiguous",
     "zero_byte_evidence",
@@ -667,6 +672,7 @@ class FundamentalsBackfillRunner:
         bse_codes: Callable[[str], frozenset[str]] | None = None,
         isins_near: Callable[[str], frozenset[str]] | None = None,
         record_relabel: Callable[[q4_relabel.RelabelRecord], None] | None = None,
+        rename_evidence: Callable[[str, date, str], parser.RenameProof | None] | None = None,
     ) -> None:
         if batched_writes and not rebuild_from_l0:
             raise ValueError(
@@ -714,6 +720,12 @@ class FundamentalsBackfillRunner:
         #: connection `commit` commits. Without it a relabel the check allows is still refused:
         #: a filing stored under a period its document did not state must carry its provenance.
         self._record_relabel = record_relabel
+        #: `(ISIN, filing date, document symbol) -> RenameProof`, for a document symbol D2 holds
+        #: no window of for the ISIN (`rename_evidence_of`): NSE's own bhavcopy of the filing's
+        #: session must list it under exactly that ISIN (owner ruling D44, class F2). Every runner
+        #: gets it, not just a re-queue — a rebuild from L0 must re-derive what a re-queue
+        #: published (invariant #1). Without it no unrecorded rename is accepted.
+        self._rename_evidence = rename_evidence
         #: Names a re-fetch (`capture_filename`). Only a run that may re-download needs one; a
         #: runner built without it fails the one unit that would have, loudly, rather than reuse.
         self._clock = clock
@@ -862,6 +874,14 @@ class FundamentalsBackfillRunner:
                 journal(item, RequeueOutcome.NOT_IN_INDEX, "the index entry names no XBRL document")
                 continue
             unit = FilingUnit(entry=entry, url=url, filename=url.rsplit("/", 1)[-1])
+            if item.legacy and not item.reuse_only:  # the register refuses it; never fetch one
+                journal(
+                    item,
+                    RequeueOutcome.FAILED,
+                    "a legacy results-index item is re-parsed from L0 only (reuse_only); "
+                    "nothing was fetched",
+                )
+                continue
             if item.reuse_only:
                 unstored = self._not_reusable(unit)
                 if unstored is not None:
@@ -909,16 +929,22 @@ class FundamentalsBackfillRunner:
         *,
         report: FundamentalsBackfillReport,
     ) -> tuple[FilingIndexEntry | None, str | None]:
-        """The item's entry, re-read from its stored index page; or None and why not."""
+        """The item's entry, re-read from its stored index page; or None and why not.
+
+        The page is an integrated-feed page, or — for a `reuse_only` item, which the register
+        enforces — a legacy results-index chunk, read with that feed's own parser. No request
+        either way: the page is read from L0 or the item is journaled `NOT_IN_INDEX`.
+        """
         if item.index_key not in pages:
             source, day, filename = item.index_ref
+            legacy = item.legacy_period
             unit = IndexUnit(
-                period=Period.QUARTERLY,
+                period=Period.QUARTERLY if legacy is None else Period(legacy),
                 from_date=day,
                 to_date=day,
                 url="",
                 filename=filename,
-                feed=IndexFeed.INTEGRATED,
+                feed=IndexFeed.INTEGRATED if legacy is None else IndexFeed.RESULTS,
             )
             try:
                 ref = self._l0.ref_for(source, day, filename)
@@ -1352,6 +1378,11 @@ class FundamentalsBackfillRunner:
                 known_symbols=self._symbols_for(isin, unit.entry.symbol, unit.entry.filing_date),
                 bse_codes=None if self._bse_codes is None else self._bse_codes(isin),
                 isins_near=self._isins_near,
+                rename_evidence=(
+                    None
+                    if self._rename_evidence is None
+                    else partial(self._rename_evidence, isin, unit.entry.filing_date)
+                ),
                 l0_key=ref.key,
                 filename=unit.filename,
             )
@@ -1823,6 +1854,119 @@ def isins_near_of(master: IdentityMaster) -> Callable[[str], frozenset[str]]:
     return near
 
 
+#: How far back from a filing date the session that vouches for a rename is looked for. NSE's
+#: longest closure in the calendar is a long weekend plus a holiday or two; ten days is ample, and
+#: a filing date with no session inside it has no statement to offer (refused, not widened).
+SESSION_LOOKBACK_DAYS: Final = 10
+
+
+def session_loader(
+    l0: L0Store, *, data_root: Path | None = None
+) -> Callable[[date], SessionIdentity | None]:
+    """The NSE session statement for a date, from L1 `prices_raw` or the L0 legacy bhavcopy.
+
+    `pr_bundle_l1.load_session_identity` — the D2 session-statement reader the price-band and CA
+    builds already use — bound to this lake. `None` when the lake holds no bhavcopy of the date.
+    """
+    return lambda session: load_session_identity(session, l0=l0, data_root=data_root)
+
+
+def rename_evidence_of(
+    master: IdentityMaster,
+    calendar: TradingCalendar,
+    load_session: Callable[[date], SessionIdentity | None],
+) -> Callable[[str, date, str], parser.RenameProof | None]:
+    """The runner's `rename_evidence`: is a document symbol D2 does not place this ISIN's that day?
+
+    What it does (owner ruling D44, 2026-11-16, class F2): for `(isin, filing_date, symbol)`,
+    returns `None` when D2 holds any window of `symbol` for `isin` — D2's history then decides on
+    its own (`symbols_accepted_on`), which is what keeps DTIL under Dhunseri Ventures refused
+    (D37). Otherwise it reads NSE's own bhavcopy of the last session on or before the filing date
+    (`SessionIdentity`; both bhavcopy eras print the ISIN on every row) and proves the rename only
+    when every NSE row of `symbol` that session, in any series, names `isin` and nothing else, and
+    D2 does not place `symbol` under another ISIN that day.
+    What it assumes: `load_session` returns the session's NSE statement or `None`. Each session is
+    read once (cached); a read that raises is cached as unreadable.
+    What it never does: accept on error, on a missing session, on an ambiguous one, or on any other
+    session's file; join on the symbol (the ISIN still comes from the index entry, invariant #2);
+    or reach the network.
+    """
+    sessions: dict[date, SessionIdentity | str | None] = {}
+
+    def statement(day: date) -> SessionIdentity | str | None:
+        if day not in sessions:
+            try:
+                sessions[day] = load_session(day)
+            except Exception as exc:  # fail closed: an unreadable session vouches for nothing
+                sessions[day] = f"{type(exc).__name__}: {exc}"
+                _LOG.warning(
+                    "fundamentals_backfill.session_statement_unreadable",
+                    source="nse_bhavcopy",
+                    date=day.isoformat(),
+                    error=sessions[day],
+                    state="FAILED",
+                )
+        return sessions[day]
+
+    def evidence(isin: str, filing_date: date, symbol: str) -> parser.RenameProof | None:
+        clean = symbol.strip().upper()
+        if any(window.symbol.strip().upper() == clean for window in master.windows_for(isin)):
+            return None
+        no_window = f"D2 holds no window of {clean} for {isin}"
+        try:
+            days = calendar.expected_data_dates(
+                filing_date - timedelta(days=SESSION_LOOKBACK_DAYS), filing_date
+            )
+        except CalendarCoverageError as exc:
+            return parser.RenameProof(
+                False,
+                f"{no_window} and the trading calendar cannot say which session to read ({exc})",
+            )
+        if not days:
+            return parser.RenameProof(
+                False,
+                f"{no_window} and NSE held no session in the {SESSION_LOOKBACK_DAYS} days to "
+                f"{filing_date.isoformat()}",
+            )
+        session = days[-1]
+        stated = statement(session)
+        if stated is None or isinstance(stated, str):
+            why = "is not stored" if stated is None else f"could not be read ({stated})"
+            return parser.RenameProof(
+                False, f"{no_window} and NSE's bhavcopy of {session.isoformat()} {why}", session
+            )
+        isins = stated.stated_for_symbol(clean, session, exchange=Exchange.NSE)
+        if isins != frozenset({isin}):
+            if not isins:
+                found = f"does not list {clean}"
+            elif isin in isins:
+                found = f"lists {clean} under more than one ISIN ({', '.join(sorted(isins))})"
+            else:
+                found = f"lists {clean} under {', '.join(sorted(isins))}, not {isin}"
+            return parser.RenameProof(
+                False, f"{no_window} and NSE's bhavcopy of {session.isoformat()} {found}", session
+            )
+        try:
+            owner = master.try_resolve(clean, session)
+        except AmbiguousSymbolError:
+            owner = "an ambiguous ISIN"
+        if owner is not None and owner != isin:
+            return parser.RenameProof(
+                False,
+                f"NSE's bhavcopy of {session.isoformat()} lists {clean} under {isin}, but D2 "
+                f"places {clean} under {owner} that day",
+                session,
+            )
+        return parser.RenameProof(
+            True,
+            f"{no_window}; NSE's bhavcopy of {session.isoformat()} lists {clean} under {isin} "
+            "and no other ISIN",
+            session,
+        )
+
+    return evidence
+
+
 def _print_plan(plan: Sequence[IndexUnit]) -> None:
     """Print the dry-run discovery plan: one line per index chunk, then the count. No socket."""
     for unit in plan:
@@ -1995,6 +2139,9 @@ def _run_live(
             bse_codes=lambda isin: bse_codes_of(master, isin),
             isins_near=isins_near_of(master),
             record_relabel=relabel_recorder(conn, clock),
+            rename_evidence=rename_evidence_of(
+                master, calendar, session_loader(l0, data_root=settings.data_root)
+            ),
             rebuild_from_l0=rebuild_from_l0,
             # A rebuild is the only run that batches its writes. It is the run whose whole shape is
             # "throw the store away and redo it from L0", so the coarser checkpoint costs a local
