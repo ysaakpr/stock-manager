@@ -19,7 +19,7 @@ from collections.abc import Sequence
 from datetime import date
 from decimal import Decimal
 from pathlib import Path
-from typing import Final
+from typing import Any, Final, cast
 
 import pytest
 import yaml
@@ -84,6 +84,12 @@ def _ruling() -> tuple[SupersededDividend, ...]:
     return load_manual_actions().superseded
 
 
+def _file_row(document: dict[str, Any], isin: str = BEML) -> dict[str, Any]:
+    """The `superseded_dividends` row of `isin` in a loaded copy of the curated file."""
+    (row,) = [r for r in document["superseded_dividends"] if r["isin"] == isin]
+    return cast(dict[str, Any], row)
+
+
 def _booked(rows: Sequence[CorporateAction], **kw: object) -> list[Decimal | None]:
     """What the total return reinvests: the collapse of the rows `reconcile` marked reconciled."""
     result = reconcile(rows, single_source_policy=ACCEPT, **kw)  # type: ignore[arg-type]
@@ -99,7 +105,7 @@ def _booked(rows: Sequence[CorporateAction], **kw: object) -> list[Decimal | Non
 
 
 def test_the_file_supersedes_bses_record_and_books_nses_amount() -> None:
-    (ruling,) = _ruling()
+    (ruling,) = [r for r in _ruling() if r.isin == BEML]
     assert (ruling.isin, ruling.ex_date) == (BEML, EX)
     assert (ruling.feed, ruling.superseded_kind, ruling.superseded_amount_inr) == (
         BSE,
@@ -211,7 +217,7 @@ def test_a_ruled_day_whose_records_changed_raises(
 def test_a_superseded_row_naming_a_record_that_does_not_exist_raises(tmp_path: Path) -> None:
     """The file's row edited to name BSE ₹0.56: the store has no such record, so nothing books."""
     document = yaml.safe_load(MANUAL_ACTIONS_PATH.read_text(encoding="utf-8"))
-    (row,) = document["superseded_dividends"]
+    row = _file_row(document)
     row["supersedes"]["amount_inr"] = "0.56"
     path = tmp_path / "manual_actions.yaml"
     path.write_text(yaml.safe_dump(document), encoding="utf-8")
@@ -286,7 +292,7 @@ def test_a_malformed_ruling_is_refused(
     tmp_path: Path, patch: dict[str, object], message: str
 ) -> None:
     document = yaml.safe_load(MANUAL_ACTIONS_PATH.read_text(encoding="utf-8"))
-    (row,) = document["superseded_dividends"]
+    row = _file_row(document)
     row.update(patch)
     path = tmp_path / "manual_actions.yaml"
     path.write_text(yaml.safe_dump(document), encoding="utf-8")

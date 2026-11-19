@@ -1092,6 +1092,27 @@ session, **2026-11-18** (`fm_job --start 2026-11-18 --session 2026-11-18` at 21:
 scheduler restart); Thu 19 Nov 22:00 is the first scheduled live session. The go, the mandates and
 the 21 hashes are unchanged.
 
+### D42 — CORALFINAC's 2017-09-06 dividend: NSE says Re 1, BSE says Rs 0.20 → **ANSWERED (owner, 2026-11-16): "Dividend Amount: ₹0.20 per equity share".**
+
+The last cross-feed dividend conflict of D27. Coral India Finance & Housing (INE558D01021) went
+ex-dividend on 2017-09-06. NSE's record states "Re 1/- Per Share" and BSE's "Rs 0.20". The
+company's board had recommended "10% dividend (Re. 1/- per Equity Share of Face Value of Rs. 10/-
+each)" on 2017-05-23. A 1:5 sub-division (₹10 shares into ₹2 shares) then went ex on 2017-08-03,
+before the book closure of 8–14 Sep 2017, so each ₹2 share received 10% of ₹2 = ₹0.20. NSE's
+record kept the pre-split figure; its record of the next year (ex 2018-07-20) states "Re 0.20 Per
+Share" on the same ₹2 basis. Booking Re 1 would credit five times the cash paid per share.
+
+Taken:
+* A `superseded_dividends` row in `dataplatform/corpactions/manual_actions.yaml`, the mechanism of
+  BEML's 2026-11-01 ruling with the feeds the other way round: BSE's ₹0.20 record is booked once and
+  NSE's Re 1 kept beside it as evidence, never booked. The row cites the issuer's 2017-05-23
+  intimation from NSE's announcement file in L0, the split and book-closure lines, and quotes this
+  ruling (`owner_ruling`), so the reconciliation note names it.
+* The ca_reconciliation flag for that day closes at the next CA finalize, the Saturday ca_refresh of
+  2026-11-21, which also recomputes the ISIN's factor chain and its L2. Nothing is reconciled or
+  rebuilt by hand. D27's one remaining fingerprint expires after 2026-11-21 (`review_by`), so from
+  22 Nov a re-raised flag is red. Task DQ-CA.
+
 ---
 
 ## Coming up

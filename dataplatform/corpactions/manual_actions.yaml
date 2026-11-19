@@ -725,3 +725,69 @@ superseded_dividends:
         quote: >-
           {"scrip_code":500048,"short_name":"BEML","Ex_date":"22 Sep 2026","Purpose":"Final
           Dividend - Rs. - 0.5500","RD_Date":"22 Sep 2026"
+  - isin: INE558D01021
+    company: Coral India Finance & Housing Ltd
+    ex_date: 2017-09-06
+    amount_inr: "0.20"
+    supersedes:
+      feed: nse_corp_actions
+      dividend_kind: UNSPECIFIED
+      amount_inr: "1"
+    issuer_document:
+      l0_key: nse_pr_bundle/2017/05/PR240517.zip
+      member: An240517.txt
+      line: 3253
+      dated: 2017-05-23
+      quote: >-
+        Coral India Finance & Housing Limited has informed the Exchange that the Board of
+        Directors have recommended 10% dividend ( Re. 1/- per Equity Share of Face Value of Rs.
+        10/- each ) for the year 2016-17.
+    owner_ruling:
+      dated: 2026-11-16
+      recorded_in: HUMAN_DECISIONS.md D42
+      quote: "Dividend Amount: ₹0.20 per equity share"
+    checked: 2026-11-19
+    note: >-
+      One FY2016-17 dividend of 10% of face value, ex 2017-09-06 (book closure 8-14 Sep 2017),
+      booked once as Rs 0.20 per FV-2 share. The board recommended it on 2017-05-23 as "10%
+      dividend (Re. 1/- per Equity Share of Face Value of Rs. 10/- each)"; the 1:5 sub-division
+      of Rs 10 shares into Rs 2 shares (board 2017-06-05, record 2017-08-04) went ex on
+      2017-08-03, before this ex-date, so each Rs 2 share held on the book closure received 10%
+      of Rs 2 = Rs 0.20. BSE's record states Rs 0.20; NSE's record and book-closure line still
+      carry the pre-split "Re 1/- Per Share" (NSE's own record of the next year, ex 2018-07-20,
+      states "Re 0.20 Per Share" on the same FV-2 basis). So BSE's record is booked and NSE's is
+      superseded: booking Re 1 would credit five times the cash paid per share. Owner ruling
+      2026-11-16 (HUMAN_DECISIONS.md D42). The NSE CA payload names the pre-split ISIN
+      INE558D01013, which the D2 lineage maps to INE558D01021.
+    sources:
+      - l0_key: bse_corp_actions/2016/09/defaultdata_531556.json
+        line: 1
+        quote: >-
+          {"scrip_code":531556,"short_name":"CORALFINAC","Ex_date":"06 Sep 2017","Purpose":"Dividend
+          - Rs. - 0.2000","RD_Date":"-","BCRD_FROM":"08 Sep 2017","BCRD_TO":"14 Sep 2017"
+      - l0_key: bse_corp_actions/2016/09/defaultdata_531556.json
+        line: 1
+        quote: >-
+          "Ex_date":"03 Aug 2017","Purpose":"Stock Split From Rs.10/- to Rs.2/-","RD_Date":"04 Aug
+          2017"
+      - l0_key: nse_corp_actions/2017/09/corporateActions_20170901_20180831.json
+        line: 1
+        quote: >-
+          "comp":"Coral India Finance & Housing Limited","exDate":"06-Sep-2017","faceVal":"2",
+          ... "subject":" Annual General Meeting/Dividend - Re 1/- Per Share","symbol":"CORALFINAC"}
+      - l0_key: nse_pr_bundle/2017/06/PR050617.zip
+        member: An050617.txt
+        line: 3139
+        quote: >-
+          recommend sub-division of its Equity shares of Rs.10/- each into five Equity shares of
+          Rs. 2/- each
+      - l0_key: nse_pr_bundle/2017/07/PR280717.zip
+        member: Bc280717.csv
+        line: 397
+        quote: EQ,CORALFINAC,Coral India Fin & Hous Lt,04/08/2017, , ,03/08/2017, , ,FV SPLT FRM RS 10 TO RS 2
+      - l0_key: nse_pr_bundle/2017/08/PR030817.zip
+        member: Bc030817.csv
+        line: 473
+        quote: >-
+          EQ,CORALFINAC,Coral India Fin & Hous Lt, ,08/09/2017,14/09/2017,06/09/2017, , ,AGM/DIV-RE
+          1/- PER SHARE

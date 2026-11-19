@@ -375,6 +375,13 @@ deviations:
   # revised final of Rs 12.28 inclusive of the May Rs 0.55) that BSE's Rs 0.55 is stale; the
   # `superseded_dividends` row in manual_actions.yaml books NSE's Rs 12.28 once (M2.3). Only
   # CORALFINAC is left.
+  # 2026-11-19: CORALFINAC ruled too (owner, 2026-11-16, HUMAN_DECISIONS.md D42): BSE's Rs 0.20
+  # per FV-2 share is booked and NSE's pre-split Re 1 superseded (manual_actions.yaml). Its open
+  # flag closes at the next CA finalize (the Saturday ca_refresh, 2026-11-21), which also
+  # recomputes the ISIN's factor chain; nothing re-reconciles by hand before then. So the
+  # fingerprint stays until that run, and `review_by` ends the acceptance the day after: from
+  # 2026-11-22 this set accepts nothing, and a regression that raised the flag again is red. Both
+  # D27 entries can then be deleted.
   - id: d27-ca-reconciliation-backlog
     kind: quality
     target: ca_reconciliation
@@ -384,7 +391,7 @@ deviations:
     remark: *d27_remark
     basis: *d27_basis
     since: 2026-09-07
-    review_by: 2027-01-31
+    review_by: 2026-11-21
 
   # The check's own alert is a warning only while every open ERROR flag is in the set above.
   - id: d27-ca-reconciliation-alert
@@ -394,7 +401,7 @@ deviations:
     remark: *d27_remark
     basis: *d27_basis
     since: 2026-09-07
-    review_by: 2027-01-31
+    review_by: 2026-11-21
 
   # ── D33: share-basis flags of the guard's first historical sweep, dated before 2026-11-01 ──
   - id: d33-share-basis-history-continuity
