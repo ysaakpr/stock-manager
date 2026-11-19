@@ -260,7 +260,11 @@ scheduler. The first scheduled `fundamentals_forward` run on or after that date 
 night's windows, under the same leases and limiter, and journals the outcome in
 `fundamentals_requeue_log`; an item with a row is never driven again. `refetch` is the normal
 per-filing path; `record_evidence` makes no request and only re-records a 404 with the index's
-zero-byte statement (D31). Bounded at 50 filings a re-queue and 100 in the file.
+zero-byte statement (D31). Bounded at 50 filings a re-queue and 100 in the file. A `reuse_only`
+re-queue (no request: an item without a complete stored document is journaled FAILED) may also name
+legacy results-index filings — a numeric unit, quoted, whose `index` is the stored
+`nse_financial_results_index/<YYYY-MM-DD>/corporates-financial-results_<Period>_<from>_<to>.json`
+chunk holding its entry (`xbrl-f2-renames-2026-11-20`, D44).
 
 ```bash
 # What did the re-queues find?
