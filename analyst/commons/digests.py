@@ -40,8 +40,10 @@ every level), which has no field for a recommendation, a rating or a price view.
 text field (``target price``, ``outperform``, ``undervalued`` and the like). **Grounded**
 (``commons-digest/2``, 2026-11-01): every number in a figure must be one the filing states
 (:func:`ground_digest`; digit grouping, scale words, rounding and date formats are read
-numerically). A refused digest is never stored. The run records it as a failure with the reason,
-and the next build retries it.
+numerically). ``commons-digest/3`` (owner ruling 2026-11-16): the opinion check skips the
+board-process phrase "on the recommendation of the Nomination and Remuneration Committee" (or of the
+Audit Committee), and nothing else (:data:`_BOARD_PROCESS`). A refused digest is never stored. The
+run records it as a failure with the reason, and the next build retries it.
 
 **Metered.** One call per uncached filing, through :mod:`analyst.llm` (so `StubLLM` drives the
 tests), on the model the caller names — the M17 roster's ``models.digest`` (Amendment 5:
@@ -117,7 +119,7 @@ __all__ = [
 _LOG = get_logger(__name__)
 
 #: Versioned identity of the prompt, the schema and the validation. Part of every digest.
-DIGEST_VERSION: Final = "commons-digest/2"
+DIGEST_VERSION: Final = "commons-digest/3"
 #: Output ceiling per digest. A digest is a paragraph and a table, not an essay.
 DIGEST_MAX_TOKENS: Final = 2_000
 #: The furthest back a run looks for a filing, in NSE sessions before the session.
@@ -301,14 +303,43 @@ _OPINION: Final = re.compile(
     r"\b(" + "|".join(re.escape(t).replace(r"\ ", r"\s+") for t in _OPINION_TERMS) + r")\b",
     re.IGNORECASE,
 )
+#: Board process, not a view on the shares: a board acting "on the recommendation of the
+#: Nomination and Remuneration Committee" (or of the Audit Committee) is how an Indian filing
+#: states an appointment or a fee. Owner ruling 2026-11-16 (option A, HUMAN_DECISIONS.md D43;
+#: pre-registration Amendment 5 (j) note): these phrases — "on", "upon" or "based on" the
+#: recommendation(s) of the Nomination and (or &) Remuneration Committee or of the Audit
+#: Committee, any case and spacing — are removed before the opinion check, and nothing else is.
+#: Every other "recommend…", and every other term, in the same text is still refused.
+_BOARD_PROCESS: Final = re.compile(
+    r"\b(?:on|upon|based\s+on)\s+the\s+recommendations?\s+of\s+the\s+"
+    r"(?:nomination\s*(?:\band\b|&)\s*remuneration|audit)\s+committee\b",
+    re.IGNORECASE,
+)
+
+
+def _without_board_process(text: str) -> str:
+    """``text`` with each board-process phrase cut out (:data:`_BOARD_PROCESS`).
+
+    The cut leaves a NUL, not a space, so the words either side of a phrase never join into an
+    opinion term of their own: ``\\s+`` in a term cannot match across it.
+    """
+    return _BOARD_PROCESS.sub("\x00", text)
 
 
 def opinion_terms(body: DigestBody) -> tuple[str, ...]:
-    """The opinion terms found in any text field of ``body``, lowercased and sorted."""
+    """The opinion terms found in any text field of ``body``, lowercased and sorted.
+
+    The board-process phrases of :data:`_BOARD_PROCESS` are not opinions and are skipped; the
+    rest of the same text is checked as before.
+    """
     texts = [body.headline, body.disclosed, body.period or ""]
     for figure in body.figures:
         texts += [figure.label, figure.value, figure.unit or "", figure.period or ""]
-    found = {" ".join(m.group(1).lower().split()) for t in texts for m in _OPINION.finditer(t)}
+    found = {
+        " ".join(m.group(1).lower().split())
+        for t in texts
+        for m in _OPINION.finditer(_without_board_process(t))
+    }
     return tuple(sorted(found))
 
 

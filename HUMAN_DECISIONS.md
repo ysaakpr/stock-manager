@@ -1113,6 +1113,28 @@ Taken:
   rebuilt by hand. D27's one remaining fingerprint expires after 2026-11-21 (`review_by`), so from
   22 Nov a re-raised flag is red. Task DQ-CA.
 
+### D43 — Digest opinion filter: the board-process phrase → **ANSWERED (owner, 2026-11-16): option A.**
+
+The Commons digest filter (`analyst/commons/digests.py`, `_OPINION_TERMS`) refuses any digest whose
+text contains "recommend…". Indian filings state appointments and fees "on the recommendation of
+the Nomination and Remuneration Committee", so the filter refused factual digests that quoted it
+(4–5 of the 20 longest announcements in the 2026-11-01 measurement, Amendment 5 (j)). Option A:
+skip only that phrase and its Audit Committee twin, and nothing else.
+
+Taken:
+* Before the opinion check, the phrases "on", "upon" or "based on" the recommendation(s) of the
+  Nomination and (or &) Remuneration Committee, or of the Audit Committee, are cut out of the text,
+  in any case and spacing (`_BOARD_PROCESS`). The cut leaves a separator, so the words on either
+  side never join into a term.
+* Every other "recommend…" is still refused ("brokers recommend buying", "we recommend",
+  "recommended a target price", the Risk Management Committee's recommendation). So is every other
+  opinion term, and so is a digest that quotes the phrase *and* states an opinion.
+* `DIGEST_VERSION` names the validation, so it moves to `commons-digest/3` for digests made from
+  the deploy. Stored digests are never re-digested.
+* Not a `mandate_hash` input (pre-registration Amendment 5 (g)/(j)). The 21 M17 hashes were
+  recomputed with the change and are unchanged. A dated note under Amendment 5 (j) records the
+  ruling. Task M17.8.
+
 ---
 
 ## Coming up
