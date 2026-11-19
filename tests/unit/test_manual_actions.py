@@ -101,7 +101,8 @@ def _sources() -> list[tuple[str, TermSource]]:
         *curated.explained_moves,
         *curated.superseded,
     ]
-    return [(r.isin, s) for r in rows for s in r.sources]
+    issuers = [(r.isin, r.issuer.l0) for r in curated.superseded if r.issuer.l0 is not None]
+    return [(r.isin, s) for r in rows for s in r.sources] + issuers
 
 
 @pytest.mark.parametrize(("isin", "source"), _sources(), ids=[i for i, _ in _sources()])

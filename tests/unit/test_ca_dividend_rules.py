@@ -359,9 +359,10 @@ def test_different_names_and_different_money_stay_a_mismatch() -> None:
 def test_beml_and_coralfinac_still_flag_under_the_rules() -> None:
     """The two genuine conflicts: different money, whatever the kinds. No rule resolves them.
 
-    CORALFINAC stays with a human. BEML's is settled only by the owner's ruling in
-    `manual_actions.yaml` (2026-11-01; `test_ca_superseded_dividend`), so it is judged here
-    without that ruling: the rules alone must still flag it.
+    Each is settled only by an owner's ruling in `manual_actions.yaml` — BEML's (2026-11-01;
+    `test_ca_superseded_dividend`) and CORALFINAC's (2026-11-16, D42;
+    `test_ca_coralfinac_ruling`) — so they are judged here without the rulings: the rules alone
+    must still flag both.
     """
     beml = [
         _row("INE258A01024", BSE, date(2026, 9, 22), F, "0.55", "Final Dividend - Rs. - 0.5500"),
@@ -382,9 +383,12 @@ def test_beml_and_coralfinac_still_flag_under_the_rules() -> None:
         result = reconcile(rows, single_source_policy=SingleSourcePolicy.ACCEPT, superseded=())
         assert result.reconciled == ()
         assert [c.reason for c in result.queue] == [ReconciliationReason.RATIO_MISMATCH]
-    # The file's rulings do not reach CORALFINAC: it flags with them loaded too.
+    # With the file's rulings loaded, CORALFINAC books BSE's ₹0.20 (D42), never NSE's Re 1.
     result = reconcile(coral, single_source_policy=SingleSourcePolicy.ACCEPT)
-    assert [c.reason for c in result.queue] == [ReconciliationReason.RATIO_MISMATCH]
+    assert result.queue == ()
+    (agreed,) = result.reconciled
+    assert isinstance(agreed.terms, DividendTerms)
+    assert agreed.terms.amount_inr == Decimal("0.2")
 
 
 # ── Patanjali: NSE's second Interim, restored from its own L0 ──────────────────────────────────

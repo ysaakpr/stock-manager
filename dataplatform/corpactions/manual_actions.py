@@ -38,7 +38,12 @@ Two kinds of row:
   (`reconcile._supersede`) books that record once and keeps the stale one beside it as evidence,
   never booked. It states no number of its own: both amounts are the feeds' own records. If
   either record is not in the store on a day the pass loads, reconciliation raises rather than
-  guess — a feed that corrected itself makes the row obsolete, and a human removes it.
+  guess — a feed that corrected itself makes the row obsolete, and a human removes it. Either
+  feed can be the stale one: CORALFINAC's 2017-09-06 dividend is the other way round (owner
+  ruling 2026-11-16, D42) — NSE's "Re 1" is the ₹10 share's amount, recommended before a 1:5
+  split went ex on 2017-08-03, and BSE's ₹0.20 per ₹2 share stands. A row may cite the issuer's
+  statement as an L0 line (the exchange's copy of it) instead of a URL, and may quote the owner's
+  ruling (`owner_ruling`) so the booked note names it.
 * **Unsourced steps** — rows in the same list whose kind is not `MARKET_MOVE`: a share-basis step
   whose terms no L0 object states. `UNSOURCED_ACTION` is one an exchange record shows to be a
   corporate action (EIH's 2006 ex-date lists a second, blank-purpose event beside its bonus);
@@ -114,6 +119,7 @@ __all__ = [
     "IssuerDocument",
     "ManualActions",
     "ManualActionsError",
+    "OwnerRuling",
     "SupersededDividend",
     "default_manual_actions",
     "load_manual_actions",
@@ -228,10 +234,34 @@ class ExplainedMove:
 
 @dataclass(frozen=True, slots=True)
 class IssuerDocument:
-    """The issuer's own statement a supersession rests on: where it is published, and its date."""
+    """The issuer's own statement a supersession rests on: where it is published, and its date.
 
-    url: str
+    Exactly one of `url` (the issuer's own published copy, https) and `l0` (the statement as an
+    exchange disseminated it, already in L0 — Coral India's 2017 dividend intimation in NSE's
+    announcement file) says where; `l0` is checked line by line like any other source.
+    """
+
     dated: date
+    quote: str
+    url: str | None = None
+    l0: TermSource | None = None
+
+    @property
+    def cited(self) -> str:
+        """Where the statement is, as one line: the URL, or the L0 object, member and line."""
+        if self.url is not None:
+            return self.url
+        assert self.l0 is not None  # the loader requires one of the two
+        where = self.l0.l0_key if self.l0.member is None else f"{self.l0.l0_key}:{self.l0.member}"
+        return where if self.l0.line is None else f"{where} line {self.l0.line}"
+
+
+@dataclass(frozen=True, slots=True)
+class OwnerRuling:
+    """The owner's decision a supersession records: when, where it is written down, its words."""
+
+    dated: date
+    recorded_in: str
     quote: str
 
 
@@ -256,6 +286,9 @@ class SupersededDividend:
     checked: date
     sources: tuple[TermSource, ...]
     note: str
+    #: The owner's ruling, when the row records one in its own words (CORALFINAC, D42). BEML's
+    #: row (2026-11-01) predates the field and names its decision in `note`.
+    ruling: OwnerRuling | None = None
 
     @property
     def booked_feed(self) -> str:
@@ -353,7 +386,8 @@ def load_manual_actions(path: Path = MANUAL_ACTIONS_PATH) -> ManualActions:
     not that feed's L0 object, a duplicate `(isin, ex_date, action_type)` (a dividend: `(isin,
     ex_date, component)`) or `(isin, trade_date)`, or an explained move on the very session a
     curated action is dated — the file cannot say both. A `superseded_dividends` row is refused
-    without its issuer document, with a feed that is not a CA feed, a first source that is not
+    without its issuer document (an https URL or a quoted L0 line, never both), with a feed that
+    is not a CA feed, a first source that is not
     the booked feed's L0 object, equal amounts, or an `(isin, ex_date)` that is listed twice or
     also carries a restored dividend.
     """
@@ -550,10 +584,31 @@ def _superseded(row: dict[str, Any]) -> SupersededDividend:
         raise ManualActionsError(f"{isin}: the superseded record states the booked amount")
     issuer = row.get("issuer_document")
     if not isinstance(issuer, dict):
-        raise ManualActionsError(f"{isin}: issuer_document (url, dated, quote) is required")
-    url = _text(issuer, "url")
-    if not url.startswith("https://"):
-        raise ManualActionsError(f"{isin}: issuer_document url {url!r} is not an https URL")
+        raise ManualActionsError(
+            f"{isin}: issuer_document (url or l0_key, dated, quote) is required"
+        )
+    url: str | None = None
+    l0: TermSource | None = None
+    if issuer.get("url") and issuer.get("l0_key"):
+        raise ManualActionsError(f"{isin}: issuer_document names a url or an l0_key, not both")
+    if issuer.get("l0_key"):
+        (l0,) = _sources({"isin": isin, "sources": [issuer]})
+        if l0.line is None:
+            raise ManualActionsError(f"{isin}: an L0 issuer_document needs its 1-based line")
+    else:
+        url = _text(issuer, "url")
+        if not url.startswith("https://"):
+            raise ManualActionsError(f"{isin}: issuer_document url {url!r} is not an https URL")
+    ruling: OwnerRuling | None = None
+    owner = row.get("owner_ruling")
+    if owner is not None:
+        if not isinstance(owner, dict):
+            raise ManualActionsError(f"{isin}: owner_ruling (dated, recorded_in, quote) expected")
+        ruling = OwnerRuling(
+            dated=_date(owner, "dated"),
+            recorded_in=" ".join(_text(owner, "recorded_in").split()),
+            quote=" ".join(_text(owner, "quote").split()),
+        )
     sources = _sources(row)
     (booked_feed,) = _RESTORABLE_FEEDS - {feed}
     if not sources[0].l0_key.startswith(f"{booked_feed}/"):
@@ -570,11 +625,15 @@ def _superseded(row: dict[str, Any]) -> SupersededDividend:
         superseded_kind=kind,
         superseded_amount_inr=stale_amount,
         issuer=IssuerDocument(
-            url=url, dated=_date(issuer, "dated"), quote=" ".join(_text(issuer, "quote").split())
+            dated=_date(issuer, "dated"),
+            quote=" ".join(_text(issuer, "quote").split()),
+            url=url,
+            l0=l0,
         ),
         checked=_date(row, "checked"),
         sources=sources,
         note=" ".join(_text(row, "note").split()),
+        ruling=ruling,
     )
 
 

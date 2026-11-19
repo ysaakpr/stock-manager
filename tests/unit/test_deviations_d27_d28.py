@@ -1,7 +1,9 @@
 """D27 and D28 as registry entries: each accepts its own known set and nothing next to it.
 
-D27 freezes 2 `ca_reconciliation` ERROR flags by fingerprint (31 until 2026-11-01, when code
-fixes resolved 12 and the owner-approved consistent-dividend rules 17 more): a flag in the set
+D27 freezes 1 `ca_reconciliation` ERROR flag by fingerprint (31 until 2026-11-01, when code
+fixes resolved 12, the owner-approved consistent-dividend rules 17 more and the BEML ruling one;
+CORALFINAC's, the last, was ruled on 2026-11-16 (D42) and the entry expires after 2026-11-21, the
+Saturday CA finalize that closes its flag): a flag in the set
 is ACCEPTED on its own, a new disagreement never is, and the check (and its alert) turns amber
 only once every open ERROR flag is in the set. D28 accepts two sources' 404/empty-body failures
 only while the row is retryable and less than 7 days past its first attempt.
@@ -98,7 +100,7 @@ def test_d27_is_a_frozen_fingerprint_set_and_nothing_else() -> None:
     assert RESOLVED_BY_RULING not in match.fingerprints
     assert match.ids is None and match.isins is None
     assert match.raised_before is None and match.dated_before is None
-    assert D27.review_by == date(2027, 1, 31)
+    assert D27.review_by == date(2026, 11, 21)
 
 
 def test_a_flag_in_the_set_is_accepted_and_a_new_one_is_not() -> None:
@@ -123,9 +125,9 @@ def test_the_check_is_amber_only_when_every_open_flag_is_in_the_set() -> None:
 
 
 def test_after_its_review_date_d27_accepts_nothing() -> None:
-    verdict = _judge(today=date(2027, 2, 1)).quality_flag("ca_reconciliation", _flag(KNOWN))
+    verdict = _judge(today=date(2026, 11, 22)).quality_flag("ca_reconciliation", _flag(KNOWN))
     assert verdict is not None and verdict.status is DeviationStatus.EXPIRED
-    on_the_day = _judge(today=date(2027, 1, 31)).quality_flag("ca_reconciliation", _flag(KNOWN))
+    on_the_day = _judge(today=date(2026, 11, 21)).quality_flag("ca_reconciliation", _flag(KNOWN))
     assert on_the_day is not None and on_the_day.accepted
 
 

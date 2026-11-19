@@ -800,6 +800,19 @@ ratification): whether the digest identity (`DIGEST_VERSION`, prompt and schema 
 become a manager hash input. A yes would change the 8 manager hashes, so it would need its own
 dated amendment before S0.
 
+*Note, 2026-11-19: the board-process phrase (owner ruling 2026-11-16, option A; HUMAN_DECISIONS.md
+D43).* The opinion-term filter above refused digests that quote "on the recommendation of the
+Nomination and Remuneration Committee". The owner ruled option A: before the opinion check, the
+filter ignores only the phrases "on", "upon" or "based on" the recommendation(s) of the Nomination
+and (or &) Remuneration Committee, or of the Audit Committee, in any case and spacing. Every other
+"recommend…" and every other opinion term is still refused, including in a digest that also quotes
+the phrase. The change is in `analyst/commons/digests.py` (`_BOARD_PROCESS`). Because
+`DIGEST_VERSION` names the validation, it moves to `commons-digest/3` for digests made from the
+deploy. Stored digests are served as they are and are never re-digested. Like the rest of (j),
+the filter is Commons code and not a `mandate_hash` input, so **no hash changes**: the 21 books'
+hashes, recomputed with the change in the tree, are byte-identical to those S0 started from
+(Amendment 6).
+
 ### Amendment 6 (2026-11-04, before S0): what the managers read, one research schema, the Global route, Luna for digests and research
 
 **RATIFIED 2026-11-04 (owner, chat: "approve the bundle"),** the R2 bundle of the Bedrock cost study

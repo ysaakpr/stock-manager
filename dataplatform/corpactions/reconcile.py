@@ -892,6 +892,8 @@ def _supersede(
     leave `by_source` as one event: the other feed's record is booked, once, and the stale one is
     kept beside it as evidence and never booked — so it can neither be booked alone nor added on
     top. BEML's 2026-09-22 final: NSE's ₹12.28 booked, BSE's pre-revision ₹0.55 superseded.
+    CORALFINAC's 2017-09-06 dividend the other way: BSE's ₹0.20 booked, NSE's pre-split Re 1
+    superseded (owner ruling 2026-11-16).
 
     A ruling whose ex-date this pass did not load (no stored row of `isin` that day) does nothing:
     a bounded or per-ISIN pass never sees it. One whose day *is* loaded but whose two records are
@@ -918,10 +920,18 @@ def _supersede(
         booked = _ruled_record(ruling, by_source, loaded, booked=True)
         by_source[ruling.feed].remove(stale)
         by_source[ruling.booked_feed].remove(booked)
+        owner = (
+            ""
+            if ruling.ruling is None
+            else (
+                f" and the owner's ruling of {ruling.ruling.dated.isoformat()} "
+                f"({ruling.ruling.recorded_in}: {ruling.ruling.quote!r})"
+            )
+        )
         note = (
             f"superseded (manual_actions.yaml, checked {ruling.checked.isoformat()}): "
             f"{stale.source} {stale.raw_text.strip()!r} is superseded by the issuer's document of "
-            f"{ruling.issuer.dated.isoformat()} ({ruling.issuer.url}); {booked.source} "
+            f"{ruling.issuer.dated.isoformat()} ({ruling.issuer.cited}){owner}; {booked.source} "
             f"{booked.raw_text.strip()!r} is booked once, the superseded record never"
         )
         out.append(

@@ -1092,6 +1092,108 @@ session, **2026-11-18** (`fm_job --start 2026-11-18 --session 2026-11-18` at 21:
 scheduler restart); Thu 19 Nov 22:00 is the first scheduled live session. The go, the mandates and
 the 21 hashes are unchanged.
 
+### D42 — CORALFINAC's 2017-09-06 dividend: NSE says Re 1, BSE says Rs 0.20 → **ANSWERED (owner, 2026-11-16): "Dividend Amount: ₹0.20 per equity share".**
+
+The last cross-feed dividend conflict of D27. Coral India Finance & Housing (INE558D01021) went
+ex-dividend on 2017-09-06. NSE's record states "Re 1/- Per Share" and BSE's "Rs 0.20". The
+company's board had recommended "10% dividend (Re. 1/- per Equity Share of Face Value of Rs. 10/-
+each)" on 2017-05-23. A 1:5 sub-division (₹10 shares into ₹2 shares) then went ex on 2017-08-03,
+before the book closure of 8–14 Sep 2017, so each ₹2 share received 10% of ₹2 = ₹0.20. NSE's
+record kept the pre-split figure; its record of the next year (ex 2018-07-20) states "Re 0.20 Per
+Share" on the same ₹2 basis. Booking Re 1 would credit five times the cash paid per share.
+
+Taken:
+* A `superseded_dividends` row in `dataplatform/corpactions/manual_actions.yaml`, the mechanism of
+  BEML's 2026-11-01 ruling with the feeds the other way round: BSE's ₹0.20 record is booked once and
+  NSE's Re 1 kept beside it as evidence, never booked. The row cites the issuer's 2017-05-23
+  intimation from NSE's announcement file in L0, the split and book-closure lines, and quotes this
+  ruling (`owner_ruling`), so the reconciliation note names it.
+* The ca_reconciliation flag for that day closes at the next CA finalize, the Saturday ca_refresh of
+  2026-11-21, which also recomputes the ISIN's factor chain and its L2. Nothing is reconciled or
+  rebuilt by hand. D27's one remaining fingerprint expires after 2026-11-21 (`review_by`), so from
+  22 Nov a re-raised flag is red. Task DQ-CA.
+
+### D43 — Digest opinion filter: the board-process phrase → **ANSWERED (owner, 2026-11-16): option A.**
+
+The Commons digest filter (`analyst/commons/digests.py`, `_OPINION_TERMS`) refuses any digest whose
+text contains "recommend…". Indian filings state appointments and fees "on the recommendation of
+the Nomination and Remuneration Committee", so the filter refused factual digests that quoted it
+(4–5 of the 20 longest announcements in the 2026-11-01 measurement, Amendment 5 (j)). Option A:
+skip only that phrase and its Audit Committee twin, and nothing else.
+
+Taken:
+* Before the opinion check, the phrases "on", "upon" or "based on" the recommendation(s) of the
+  Nomination and (or &) Remuneration Committee, or of the Audit Committee, are cut out of the text,
+  in any case and spacing (`_BOARD_PROCESS`). The cut leaves a separator, so the words on either
+  side never join into a term.
+* Every other "recommend…" is still refused ("brokers recommend buying", "we recommend",
+  "recommended a target price", the Risk Management Committee's recommendation). So is every other
+  opinion term, and so is a digest that quotes the phrase *and* states an opinion.
+* `DIGEST_VERSION` names the validation, so it moves to `commons-digest/3` for digests made from
+  the deploy. Stored digests are never re-digested.
+* Not a `mandate_hash` input (pre-registration Amendment 5 (g)/(j)). The 21 M17 hashes were
+  recomputed with the change and are unchanged. A dated note under Amendment 5 (j) records the
+  ruling. Task M17.8.
+
+### D44 — XBRL class F2 (company renames), and the other refused classes → **ANSWERED (owner, 2026-11-16): "go with your recommended way" — accept the renames on identity evidence, keep every other class refused.**
+
+The data-lake status report of 2026-11-06 (§4.3, PR #170) left 503 XBRL filings refused and not
+accepted. Class F2 is 89 legacy results-index filings (2018–2023) whose document states the
+company's old symbol under an index entry that states the new one:
+
+| Pair (index ← document) | Count |
+|---|---|
+| SEPC ← SHRIRAMEPC | 34 |
+| ZFCVINDIA ← WABCOINDIA | 21 |
+| PATANJALI ← RUCHI | 13 |
+| KEEPLEARN ← DALALSTCOM | 10 |
+| RBA ← BURGERKING | 5 |
+| ESSENTIA ← INTEGRA | 5 |
+| MOTHERSON ← blank | 1 |
+
+**F2 — accepted where D2 proves the rename.** D2's symbol-change records hold none of these six
+renames: NSE's `symbolchange.csv` omits them, and the master knows only each ISIN's current symbol.
+So the proof is D2's other identity source, the exchange's same-session statement
+(`identity/session.py`; both bhavcopy eras print the ISIN on every row).
+
+A filing is accepted only when both hold:
+* NSE's own bhavcopy of the last session on or before its filing date lists the document's symbol
+  under exactly the entry's ISIN and no other;
+* D2 does not place that symbol under another ISIN that day.
+
+The ISIN still comes from the index (invariant #2), and the document is stored with its own
+stated values. A symbol D2 does hold a window of is decided by D2 alone, so DTIL under Dhunseri
+Ventures (D37) stays refused. The rule is general, so a rebuild from L0 re-derives what the
+re-queue publishes.
+
+The 89 are re-parsed once from their complete L0 documents by the reuse-only re-queue
+`xbrl-f2-renames-2026-11-20` (no request, raised bound 89), in the `fundamentals_forward` run of
+Fri 20 Nov 02:00 IST. To allow it, the re-queue register now accepts legacy results-index units in
+a `reuse_only` re-queue.
+
+Offline simulation, 2026-11-19:
+* **71 publish:** SEPC 30, ZFCVINDIA 20, PATANJALI 13, RBA 5, KEEPLEARN 3.
+* **13 stay refused because the rename cannot be proven.** Their errors now say why: DALALSTCOM 7
+  and INTEGRA 5 (NSE's bhavcopy of the session does not list the symbol), and the MOTHERSON
+  document, which states no symbol.
+* **5 stay refused for another reason.** They pass the identity proof but ask the document for a
+  period it does not hold: SEPC 1045992/1045994/1045996/1045998 and ZFCVINDIA 1062166. Their
+  sibling entries over the same documents publish.
+
+**Every other class — kept refused (question closed).** These stay errors on `/status/gaps`, shown
+as they are and not accepted:
+* A 166 (Q4 labelled a half-year that failed the strict check);
+* M 117 (old half-year);
+* K/L 104 (no published sibling);
+* G 13 (a different issuer's ISIN);
+* C 7 (date typos, including the ICICIPRULI `-FY` row);
+* H 6 (entity-identifier scheme);
+* the one multi-entity PANACHE filing.
+
+Their red is the owner's informed choice, not an open question. The 710 `MissingPayloadError`
+filings are a separate item (a re-fetch is owner-gated) and are not part of this ruling. Task
+M14.3.
+
 ---
 
 ## Coming up

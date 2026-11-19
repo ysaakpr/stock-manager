@@ -69,7 +69,9 @@ from dataplatform.ingest.fundamentals_backfill import (
     build_integrated_units,
     isins_in_price_window,
     isins_near_of,
+    rename_evidence_of,
     resolve_universe,
+    session_loader,
     symbols_accepted_on,
     try_resolve_unambiguous,
 )
@@ -408,6 +410,9 @@ def run_forward_plan(
             bse_codes=lambda isin: bse_codes_of(master, isin),
             isins_near=isins_near_of(master),
             record_relabel=relabel_recorder(conn, clock),
+            rename_evidence=rename_evidence_of(
+                master, calendar, session_loader(l0, data_root=settings.data_root)
+            ),
             clock=clock,
         )
         _LOG.info(

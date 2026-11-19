@@ -49,6 +49,7 @@ from analyst.commons import (
 from analyst.commons.digests import (
     DIGEST_SYSTEM_PROMPT,
     DIGEST_TOOL,
+    DIGEST_VERSION,
     MAX_FILING_CHARS,
     digest_messages,
     filing_inputs,
@@ -733,3 +734,114 @@ def test_on_demand_refuses_a_future_filing() -> None:
     world.announcements.append(_ann(RISING, "r-future", DAY3))
     with pytest.raises(PitError):
         _on_demand(world, InMemoryDigestStore(), _stub(world), frozenset({RISING}))
+
+
+# ── board process is not an opinion (owner ruling 2026-11-16, option A, D43) ─────────────────────
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "The Board appointed Mr A as Director on the recommendation of the Nomination and "
+        "Remuneration Committee.",
+        "Upon the recommendations of the Nomination & Remuneration Committee, the Board agreed.",
+        "BASED ON THE RECOMMENDATION OF THE NOMINATION AND REMUNERATION COMMITTEE, fees were set.",
+        "Based  on\nthe   recommendation of  the Nomination\tand Remuneration   Committee, done.",
+        "The Board re-appointed the auditors on the recommendation of the Audit Committee.",
+        "upon the recommendations of the audit committee the board approved the results",
+        "On the recommendation of the Nomination &Remuneration Committee, a KMP was appointed.",
+    ],
+)
+def test_the_board_process_phrases_pass(text: str) -> None:
+    body = parse_digest({**GOOD_BODY, "disclosed": text})
+    assert opinion_terms(body) == ()
+
+
+def test_the_board_process_phrase_passes_in_a_headline_and_a_figure_label() -> None:
+    figure = {
+        **GOOD_BODY["figures"][0],
+        "label": "Sitting fee on the recommendation of the Audit Committee",
+    }
+    body = parse_digest(
+        {
+            **GOOD_BODY,
+            "headline": "Director appointed on the recommendation of the Nomination and "
+            "Remuneration Committee",
+            "figures": [figure],
+        }
+    )
+    assert opinion_terms(body) == ()
+
+
+@pytest.mark.parametrize(
+    ("text", "term"),
+    [
+        ("Brokers recommend buying the shares.", "recommend"),
+        ("We recommend accumulating on dips.", "recommend"),
+        ("Analysts recommended a target price of Rs 1,450.", "recommended"),
+        ("The board's recommendation is to buy.", "recommendation"),
+        # Only the two committees, and only after on / upon / based on.
+        (
+            "On the recommendation of the Risk Management Committee, it was approved.",
+            "recommendation",
+        ),
+        ("The Nomination and Remuneration Committee recommended his appointment.", "recommended"),
+        ("Following the recommendation of the Audit Committee, it was approved.", "recommendation"),
+        ("On recommendation of the Audit Committee, it was approved.", "recommendation"),
+    ],
+)
+def test_every_other_recommend_is_still_refused(text: str, term: str) -> None:
+    with pytest.raises(DigestRefusedError, match="opinion") as refused:
+        parse_digest({**GOOD_BODY, "disclosed": text})
+    assert term in str(refused.value)
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "On the recommendation of the Nomination and Remuneration Committee, the Board appointed "
+        "Mr A; we believe the shares are undervalued.",
+        "Upon the recommendation of the Audit Committee the auditors were re-appointed, and "
+        "brokers recommend buying.",
+        "On the recommendation of the Nomination and Remuneration Committee, target price raised.",
+    ],
+)
+def test_a_digest_with_the_phrase_and_an_opinion_is_still_refused(text: str) -> None:
+    with pytest.raises(DigestRefusedError, match="opinion"):
+        parse_digest({**GOOD_BODY, "disclosed": text})
+
+
+def test_the_cut_phrase_never_joins_its_neighbours_into_a_term() -> None:
+    """'we' + phrase + 'believe' must not read as 'we believe' — nor hide it either."""
+    body = DigestBody.model_validate(
+        {
+            **GOOD_BODY,
+            "disclosed": "Strong buy on the recommendation of the Audit Committee rating.",
+        }
+    )
+    assert opinion_terms(body) == ("strong buy",)
+    joined = DigestBody.model_validate(
+        {
+            **GOOD_BODY,
+            "disclosed": "Buy on the recommendation of the Audit Committee rating approved.",
+        }
+    )
+    assert opinion_terms(joined) == ()
+
+
+def test_a_stored_record_with_the_phrase_is_valid_and_one_with_an_opinion_is_not() -> None:
+    world, store = _world(), InMemoryDigestStore()
+    _run(world, store, _stub(world))
+    digest = store.get("nse_announcements:r-1")
+    assert digest is not None
+    payload = digest.model_dump()
+    phrase = "Appointed on the recommendation of the Nomination and Remuneration Committee."
+    payload["body"] = {**GOOD_BODY, "disclosed": phrase}
+    FilingDigest.model_validate(payload)
+    payload["body"] = {**GOOD_BODY, "disclosed": phrase + " We recommend the stock."}
+    with pytest.raises(ValueError, match="opinion"):
+        FilingDigest.model_validate(payload)
+
+
+def test_the_validation_change_is_a_new_digest_version() -> None:
+    assert DIGEST_VERSION == "commons-digest/3"

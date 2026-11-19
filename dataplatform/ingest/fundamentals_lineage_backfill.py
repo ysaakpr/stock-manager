@@ -52,6 +52,8 @@ from dataplatform.ingest.fundamentals_backfill import (
     FundamentalsBackfillRunner,
     bse_codes_of,
     isins_near_of,
+    rename_evidence_of,
+    session_loader,
     symbols_accepted_on,
 )
 from dataplatform.ingest.fundamentals_relabel import recorder as relabel_recorder
@@ -323,6 +325,9 @@ def run_fundamentals_lineage_backfill(
             bse_codes=lambda isin: bse_codes_of(master, isin),
             isins_near=isins_near_of(master),
             record_relabel=relabel_recorder(conn, clock),
+            rename_evidence=rename_evidence_of(
+                master, calendar, session_loader(l0, data_root=settings.data_root)
+            ),
             clock=clock,
         )
         report = runner.ingest(selection.entries)
