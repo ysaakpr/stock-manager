@@ -1135,6 +1135,65 @@ Taken:
   recomputed with the change and are unchanged. A dated note under Amendment 5 (j) records the
   ruling. Task M17.8.
 
+### D44 — XBRL class F2 (company renames), and the other refused classes → **ANSWERED (owner, 2026-11-16): "go with your recommended way" — accept the renames on identity evidence, keep every other class refused.**
+
+The data-lake status report of 2026-11-06 (§4.3, PR #170) left 503 XBRL filings refused and not
+accepted. Class F2 is 89 legacy results-index filings (2018–2023) whose document states the
+company's old symbol under an index entry that states the new one:
+
+| Pair (index ← document) | Count |
+|---|---|
+| SEPC ← SHRIRAMEPC | 34 |
+| ZFCVINDIA ← WABCOINDIA | 21 |
+| PATANJALI ← RUCHI | 13 |
+| KEEPLEARN ← DALALSTCOM | 10 |
+| RBA ← BURGERKING | 5 |
+| ESSENTIA ← INTEGRA | 5 |
+| MOTHERSON ← blank | 1 |
+
+**F2 — accepted where D2 proves the rename.** D2's symbol-change records hold none of these six
+renames: NSE's `symbolchange.csv` omits them, and the master knows only each ISIN's current symbol.
+So the proof is D2's other identity source, the exchange's same-session statement
+(`identity/session.py`; both bhavcopy eras print the ISIN on every row).
+
+A filing is accepted only when both hold:
+* NSE's own bhavcopy of the last session on or before its filing date lists the document's symbol
+  under exactly the entry's ISIN and no other;
+* D2 does not place that symbol under another ISIN that day.
+
+The ISIN still comes from the index (invariant #2), and the document is stored with its own
+stated values. A symbol D2 does hold a window of is decided by D2 alone, so DTIL under Dhunseri
+Ventures (D37) stays refused. The rule is general, so a rebuild from L0 re-derives what the
+re-queue publishes.
+
+The 89 are re-parsed once from their complete L0 documents by the reuse-only re-queue
+`xbrl-f2-renames-2026-11-20` (no request, raised bound 89), in the `fundamentals_forward` run of
+Fri 20 Nov 02:00 IST. To allow it, the re-queue register now accepts legacy results-index units in
+a `reuse_only` re-queue.
+
+Offline simulation, 2026-11-19:
+* **71 publish:** SEPC 30, ZFCVINDIA 20, PATANJALI 13, RBA 5, KEEPLEARN 3.
+* **13 stay refused because the rename cannot be proven.** Their errors now say why: DALALSTCOM 7
+  and INTEGRA 5 (NSE's bhavcopy of the session does not list the symbol), and the MOTHERSON
+  document, which states no symbol.
+* **5 stay refused for another reason.** They pass the identity proof but ask the document for a
+  period it does not hold: SEPC 1045992/1045994/1045996/1045998 and ZFCVINDIA 1062166. Their
+  sibling entries over the same documents publish.
+
+**Every other class — kept refused (question closed).** These stay errors on `/status/gaps`, shown
+as they are and not accepted:
+* A 166 (Q4 labelled a half-year that failed the strict check);
+* M 117 (old half-year);
+* K/L 104 (no published sibling);
+* G 13 (a different issuer's ISIN);
+* C 7 (date typos, including the ICICIPRULI `-FY` row);
+* H 6 (entity-identifier scheme);
+* the one multi-entity PANACHE filing.
+
+Their red is the owner's informed choice, not an open question. The 710 `MissingPayloadError`
+filings are a separate item (a re-fetch is owner-gated) and are not part of this ruling. Task
+M14.3.
+
 ---
 
 ## Coming up
