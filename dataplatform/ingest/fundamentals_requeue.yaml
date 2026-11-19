@@ -446,8 +446,11 @@ requeues:
   # under exactly the entry's ISIN and no other (`fundamentals_backfill.rename_evidence_of`); the
   # document is then stored with its own stated values. All 89 are legacy results-index filings
   # (2018-2023), re-read from their stored index chunk and re-parsed from their complete L0
-  # documents: reuse_only, no request, raised bound 89. The ones the bhavcopy cannot prove (offline
-  # 2026-11-19: 7 DALALSTCOM, 5 INTEGRA, the blank MOTHERSON) are driven once and re-record why.
+  # documents: reuse_only, no request, raised bound 89. Offline 2026-11-19: 71 publish. 13 the
+  # bhavcopy cannot prove (7 DALALSTCOM, 5 INTEGRA, the blank MOTHERSON) are driven once and
+  # re-record why; 5 more pass the identity proof but ask the document for a period it does not
+  # hold (SEPC 1045992/1045994/1045996/1045998, ZFCVINDIA 1062166) and re-record that refusal
+  # instead — their sibling entries over the same documents publish.
   - id: xbrl-f2-renames-2026-11-20
     action: refetch
     reuse_only: true
