@@ -1,0 +1,22 @@
+{
+  "status": "success",
+  "data": {
+    "user_type": "individual",
+    "email": "trader@example.com",
+    "user_name": "Test Account",
+    "user_shortname": "Test",
+    "broker": "ZERODHA",
+    "exchanges": ["NSE", "BSE", "MF"],
+    "products": ["CNC", "NRML", "MIS"],
+    "order_types": ["MARKET", "LIMIT", "SL", "SL-M"],
+    "avatar_url": null,
+    "user_id": "AB1234",
+    "api_key": null,
+    "access_token": "synthtoken0001",
+    "public_token": "synthpublic",
+    "refresh_token": "",
+    "enctoken": "",
+    "login_time": "2026-11-06 09:00:00",
+    "meta": {"demat_consent": "physical"}
+  }
+}

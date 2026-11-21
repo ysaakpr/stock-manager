@@ -1,0 +1,71 @@
+{
+  "status": "success",
+  "data": {
+    "net": [
+      {
+        "tradingsymbol": "WIPRO",
+        "exchange": "NSE",
+        "instrument_token": 969473,
+        "product": "CNC",
+        "quantity": -25,
+        "overnight_quantity": 0,
+        "multiplier": 1,
+        "average_price": 452.00,
+        "close_price": 450.00,
+        "last_price": 452.10,
+        "value": 11300.00,
+        "pnl": -2.50,
+        "m2m": -2.50,
+        "unrealised": -2.50,
+        "realised": 0,
+        "buy_quantity": 0,
+        "buy_price": 0,
+        "buy_value": 0,
+        "buy_m2m": 0,
+        "sell_quantity": 25,
+        "sell_price": 452.00,
+        "sell_value": 11300.00,
+        "sell_m2m": 11300.00,
+        "day_buy_quantity": 0,
+        "day_buy_price": 0,
+        "day_buy_value": 0,
+        "day_sell_quantity": 25,
+        "day_sell_price": 452.00,
+        "day_sell_value": 11300.00
+      }
+    ],
+    "day": [
+      {
+        "tradingsymbol": "WIPRO",
+        "exchange": "NSE",
+        "instrument_token": 969473,
+        "product": "CNC",
+        "quantity": -25,
+        "overnight_quantity": 0,
+        "multiplier": 1,
+        "average_price": 452.00,
+        "close_price": 450.00,
+        "last_price": 452.10,
+        "value": 11300.00,
+        "pnl": -2.50,
+        "m2m": -2.50,
+        "unrealised": -2.50,
+        "realised": 0,
+        "buy_quantity": 0,
+        "buy_price": 0,
+        "buy_value": 0,
+        "buy_m2m": 0,
+        "sell_quantity": 25,
+        "sell_price": 452.00,
+        "sell_value": 11300.00,
+        "sell_m2m": 11300.00,
+        "day_buy_quantity": 0,
+        "day_buy_price": 0,
+        "day_buy_value": 0,
+        "day_sell_quantity": 25,
+        "day_sell_price": 452.00,
+        "day_sell_value": 11300.00
+      }
+    ]
+  }
+}

@@ -1,0 +1,6 @@
+{
+  "status": "error",
+  "message": "Incorrect `api_key` or `access_token`.",
+  "data": null,
+  "error_type": "TokenException"
+}

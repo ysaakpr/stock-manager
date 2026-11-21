@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "kite-portfolio": {
+      "command": "uv",
+      "args": ["run", "--quiet", "python", "-m", "analyst.owner_portfolio.mcp_server"]
+    }
+  }
+}

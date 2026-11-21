@@ -1,0 +1,20 @@
+{
+  "status": "success",
+  "data": [
+    {
+      "trade_id": "70000001",
+      "order_id": "261106000000001",
+      "exchange": "NSE",
+      "tradingsymbol": "WIPRO",
+      "instrument_token": 969473,
+      "product": "CNC",
+      "average_price": 452.00,
+      "quantity": 25,
+      "exchange_order_id": "1100000000000001",
+      "transaction_type": "SELL",
+      "fill_timestamp": "2026-11-06 09:20:11",
+      "order_timestamp": "09:20:11",
+      "exchange_timestamp": "2026-11-06 09:20:11"
+    }
+  ]
+}

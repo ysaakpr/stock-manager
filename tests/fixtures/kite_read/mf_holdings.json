@@ -1,0 +1,16 @@
+{
+  "status": "success",
+  "data": [
+    {
+      "folio": "123456789/01",
+      "fund": "SYNTHETIC FLEXI CAP FUND - DIRECT PLAN",
+      "tradingsymbol": "INF000S01011",
+      "average_price": 52.1234,
+      "last_price": 58.4321,
+      "last_price_date": "2026-11-05",
+      "pnl": 3154.35,
+      "quantity": 500.123,
+      "pledged_quantity": 0
+    }
+  ]
+}
