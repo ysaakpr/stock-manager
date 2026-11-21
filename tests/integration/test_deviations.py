@@ -353,8 +353,9 @@ def test_the_judge_reads_nothing_for_an_item_no_entry_targets(conn: Connection) 
     assert judge.alert("job:identity_refresh:failed") is None
 
 
-# ── D27 / D28 (owner, 2026-10-24) ────────────────────────────────────────────────────────────
+# ── D27 retired (2026-11-21) / D28 (owner, 2026-10-24) ──────────────────────────────────────
 
+#: CORALFINAC's, D27's last fingerprint; its flag closed at the 2026-11-21 ca_refresh (D42).
 D27_KNOWN: Final = "69102f228404b6f9cbe237d4bf3d38b1"  # INE558D01021 2017-09-06
 
 
@@ -371,21 +372,20 @@ def _ca_flag(conn: Connection, fingerprint: str, raised: datetime) -> None:
     )
 
 
-def test_d27_marks_the_known_flag_and_keeps_a_new_one_red(
+def test_a_reraised_former_d27_flag_is_red_like_a_new_one(
     client: TestClient, conn: Connection
 ) -> None:
     _ca_flag(conn, D27_KNOWN, datetime(2026, 9, 7, 14, 24, tzinfo=IST))
     _ca_flag(conn, "0123456789abcdef0123456789abcdef", datetime(2026, 10, 20, 9, 0, tzinfo=IST))
     body = client.get("/status/quality").json()
     (check,) = [c for c in body["by_check"] if c["check_name"] == "ca_reconciliation"]
-    assert check["count"] == 2 and check["accepted"] == 1 and check["deviation"] is None
+    assert check["count"] == 2 and check["accepted"] == 0 and check["deviation"] is None
     verdicts = {
         flag["detail"]["fingerprint"]: flag["deviation"]
         for flag in body["flags"]
         if flag["check_name"] == "ca_reconciliation"
     }
-    assert verdicts[D27_KNOWN]["id"] == "d27-ca-reconciliation-backlog"
-    assert verdicts["0123456789abcdef0123456789abcdef"] is None
+    assert verdicts == {D27_KNOWN: None, "0123456789abcdef0123456789abcdef": None}
 
 
 def test_d28_marks_a_recent_retrying_xbrl_404_on_the_gaps_page(

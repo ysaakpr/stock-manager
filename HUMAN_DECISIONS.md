@@ -1112,6 +1112,11 @@ Taken:
   2026-11-21, which also recomputes the ISIN's factor chain and its L2. Nothing is reconciled or
   rebuilt by hand. D27's one remaining fingerprint expires after 2026-11-21 (`review_by`), so from
   22 Nov a re-raised flag is red. Task DQ-CA.
+* 2026-11-21: D27 entries removed after the flag closed. The ca_refresh of 10:00 IST resolved
+  flag 37098 (fingerprint `69102f228404b6f9cbe237d4bf3d38b1`) and left both 2017-09-06 dividend
+  rows reconciled; no open ca_reconciliation ERROR flag remained. `d27-ca-reconciliation-backlog`
+  and `d27-ca-reconciliation-alert` are deleted from `accepted_deviations.yaml`, so the check
+  accepts nothing and any re-raised flag is red. Task DQ-CA.
 
 ### D43 — Digest opinion filter: the board-process phrase → **ANSWERED (owner, 2026-11-16): option A.**
 
