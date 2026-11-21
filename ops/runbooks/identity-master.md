@@ -212,6 +212,58 @@ uv run python -m dataplatform.identity.repair_avenuesai --apply   # locks three 
   derived ones, and stage 4 stitches their survivors' L2. A derived edge that restates a MANUAL
   one is not written again. Do not delete the MANUAL row.
 
+## Any reissue the refresh stored as ambiguous: `repair_reissue`
+
+`repair_avenuesai`, generalised. Use it when an `identity_refresh` logs
+`identity.reissue.no_boundary` for a pair of one issuer code and stores the new ISIN's windows
+from the listing date. You give the two ISINs, the first session as the new ISIN, and the snapshot
+whose ingest stored the rows. It re-reads L0 and refuses unless the evidence says exactly that:
+
+```bash
+uv run python -m dataplatform.identity.repair_reissue --old <old> --new <new> \
+  --effective <first new session> --snapshot-date <refresh date>              # dry run, READ ONLY
+uv run python -m dataplatform.identity.repair_reissue ... --apply --note "<who approved; follow-ups>"
+```
+
+What it checks in L0 before planning anything (no network):
+
+* The bhavcopy of `--effective` trades exactly one symbol as the new ISIN.
+* No stored session before then trades the new ISIN, and none from then trades the old one.
+* The last session before it that trades the symbol shows the old ISIN only. At most 10 sessions
+  between them may lack the symbol (a suspension).
+* The `EQUITY_L` capture of that last old session lists the old ISIN. Captures before the switch
+  list the old ISIN or omit the symbol. Every capture from `--effective` to `--snapshot-date` lists
+  the new ISIN.
+* A face-value change is explained by an `nse_corp_actions` record for the old ISIN, ex
+  `--effective`, with those face values.
+
+Then the same plan and the same guarantees as `repair_avenuesai`, through the same code: one
+transaction, a MANUAL edge, delete only the new ISIN's pre-switch windows written that morning,
+require the re-derived snapshot to change nothing else, and resolve the pair's open rows. A second
+`--apply` is a no-op.
+
+After it, re-key the filing feeds (`filing_rekey`, below), because a MANUAL edge changed
+`isin_lineage`. Then check the refresh without fetching:
+`identity.ingest --from-l0 <refresh date> --dry-run` must show 0 conflicts for the pair.
+
+**2026-11-21, BNAGROCHEM (first use).** BN Agrochem split ₹10 → ₹1 ex 2026-11-16 and its ISIN went
+INE00HZ01011 → INE00HZ01029. The L0 bhavcopy of Fri 2026-11-13 is the last old session and Mon
+2026-11-16 the first new one, with no gap. The captures show the old ISIN through Sat 2026-11-14
+and the new one from 2026-11-16. The refresh failed for a reason that will recur:
+
+* The last old capture is the Saturday one that `identity_refresh` itself takes.
+  `L0EquityListSeries` confirms the old ISIN against sessions in [last old capture, first new
+  capture). Starting on a Saturday, there is no session in that range (`session_disagrees`,
+  `before_isins=None`).
+* So a reissue that takes effect on a Monday fails this way until that check also looks back past
+  a non-session capture.
+
+The refresh stored `symbol_history` 11646 (INE00HZ01029 from 2026-04-20) and queued reconciliation
+84 (INGEST). At 10:00 IST, `ca_refresh` held the split back on that conflict and queued 85 (RESOLVE,
+2026-11-16). With the edge in place, the next `ca_refresh` files the split against INE00HZ01029,
+with `filed_against_isin` INE00HZ01011. Its 35-day window still covers the ex-date until
+2026-12-21. Check `corporate_actions` after it runs.
+
 ## `lineage_rebuild`: MANUAL edges and conflicts
 
 Before a real `identity.lineage_rebuild`, run the dry run. It derives stage 1, writes it in a
