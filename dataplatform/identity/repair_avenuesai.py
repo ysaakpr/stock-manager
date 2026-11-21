@@ -211,6 +211,9 @@ class RepairPlan:
     reissue: Reissue
     already_applied: bool
     evidence: tuple[EvidenceLine, ...] = ()
+    #: The command that planned it, for the printed plan and the log events. `repair_reissue`
+    #: plans through this module for any reissue; this one-off keeps its own name.
+    command: str = "repair_avenuesai"
     deletes: tuple[_StoredRow, ...] = ()
     history: HistoryPlan = field(default_factory=HistoryPlan)
     resolutions: tuple[tuple[_OpenConflict, str], ...] = ()
@@ -218,7 +221,7 @@ class RepairPlan:
     def describe(self) -> list[str]:
         """The plan as lines a human reads before saying `--apply`."""
         r = self.reissue
-        head = f"repair_avenuesai {self.snapshot_date}"
+        head = f"{self.command} {self.snapshot_date}"
         if self.already_applied:
             return [f"{head}: already applied — nothing to do"]
         lines = [f"{head}: plan (one transaction)"]
@@ -349,6 +352,9 @@ def plan_repair(
     snapshot_date: date = REPAIR_SNAPSHOT_DATE,
     reissue: Reissue = AVENUESAI,
     evidence: ReissueEvidence | None = None,
+    evidence_lines: tuple[EvidenceLine, ...] | None = None,
+    reason: str | None = None,
+    command: str = "repair_avenuesai",
 ) -> RepairPlan:
     """Decide the repair without writing. Raises `RepairRefusedError` on any surprise.
 
@@ -361,8 +367,13 @@ def plan_repair(
     What it assumes: the caller's transaction; `equity_list`/`symbol_changes` are the snapshot
     the stale rows came from.
     What it never does: write, or plan for an ISIN other than the two in `reissue`.
+
+    `evidence_lines`, `reason` and `command` are for `repair_reissue`, which checks its own (more
+    general) L0 evidence before calling this; left out, AvenuesAI's `check_evidence` runs and its
+    own resolution text is recorded.
     """
-    evidence_lines = check_evidence(l0, reissue)
+    if evidence_lines is None:
+        evidence_lines = check_evidence(l0, reissue)
     r = reissue
 
     edges = conn.execute(
@@ -403,8 +414,10 @@ def plan_repair(
         and [_shape(row.window) for row in new] == repaired_new
         and not conflicts
     ):
-        _log.info("identity.repair_avenuesai.already_applied", snapshot_date=str(snapshot_date))
-        return RepairPlan(snapshot_date=snapshot_date, reissue=r, already_applied=True)
+        _log.info(f"identity.{command}.already_applied", snapshot_date=str(snapshot_date))
+        return RepairPlan(
+            snapshot_date=snapshot_date, reissue=r, already_applied=True, command=command
+        )
 
     seen = ", ".join(_window(row.window) for row in rows) or "no NSE windows"
     if has_edge:
@@ -460,7 +473,7 @@ def plan_repair(
     if after:
         raise RepairRefusedError(f"repair would still leave conflicts: {[str(c) for c in after]}")
 
-    resolutions = _resolutions(conflicts, r)
+    resolutions = _resolutions(conflicts, r, reason=reason)
     return RepairPlan(
         snapshot_date=snapshot_date,
         reissue=r,
@@ -469,6 +482,7 @@ def plan_repair(
         deletes=tuple(stale),
         history=history,
         resolutions=resolutions,
+        command=command,
     )
 
 
@@ -514,7 +528,7 @@ def apply_repair(conn: Connection, plan: RepairPlan, *, clock: Clock) -> RepairC
     if counts != want:
         raise RepairRefusedError(f"repair wrote {counts}, planned {want}; roll back")
     _log.info(
-        "identity.repair_avenuesai.applied",
+        f"identity.{plan.command}.applied",
         source=_EQUITY_LIST,
         snapshot_date=plan.snapshot_date.isoformat(),
         old_isin=r.old_isin,
@@ -608,7 +622,7 @@ def _open_conflicts(conn: Connection, r: Reissue) -> list[_OpenConflict]:
 
 
 def _resolutions(
-    conflicts: Sequence[_OpenConflict], r: Reissue
+    conflicts: Sequence[_OpenConflict], r: Reissue, *, reason: str | None = None
 ) -> tuple[tuple[_OpenConflict, str], ...]:
     """The INGEST rows must be exactly `r.conflicts`; RESOLVE rows the same defect raised later
     (a resolver asking about CCAVENUE) are resolved with them."""
@@ -620,6 +634,8 @@ def _resolutions(
     )
     if not matches:
         raise RepairRefusedError(f"expected open INGEST rows {want}, found {ingest}")
+    if reason is not None:
+        return tuple((c, reason) for c in conflicts)
     reason = (
         f"repair_avenuesai: ISIN reissued {r.old_isin} -> {r.new_isin} (AvenuesAI; NSE INFIBEAM, "
         f"CCAVENUE from 2026-02-03) across a suspension: last old session "
