@@ -68,18 +68,6 @@ x-bse-remark: &bse_remark >-
   api.bseindia.com has refused this server (HTTP 403) since 2026-09-24; the owner chose on
   2026-10-12 to ignore BSE for now, and AGENTIC_CONTEXT §8 forbids working around a refusal.
 
-# D27 (owner, 2026-10-24): the old cross-feed corporate-action disagreements, awaiting a human.
-x-d27-basis: &d27_basis
-  agreed_by: owner
-  agreed_on: 2026-10-24
-  recorded_in:
-    - "HUMAN_DECISIONS.md D27 (owner, 2026-10-24: 'agree')"
-    - "M2.3: a cross-feed disagreement is a human's adjudication, never resolved by code"
-
-x-d27-remark: &d27_remark >-
-  Cross-feed disagreement from before 2026-10-07, awaiting human adjudication (M2.3); accepted so
-  it doesn't hide new ones.
-
 # D28 (owner, 2026-10-24): failures still being retried show amber, red once 7 days old.
 x-d28-basis: &d28_basis
   agreed_by: owner
@@ -355,53 +343,8 @@ deviations:
     basis: *bse_basis
     since: 2026-09-08
 
-  # ── D27: ca_reconciliation ERROR flags raised before 2026-10-07, by frozen fingerprint ───────
-  # The exact set, computed read-only on 2026-10-24 from the open ERROR flags raised before
-  # 2026-10-07 IST (192): minus the 9 EX_DATE_MISMATCH (#133 fixes them), minus 147 dividend
-  # RATIO_MISMATCH whose ex-date carries >=2 distinct dividend rows in one feed's own L0 payload
-  # (the one-dividend-per-feed-per-day key drops the second; being fixed separately), minus 5 whose
-  # stored row states two dividends in one line. A flag outside this list — any new disagreement —
-  # stays red. Each line: fingerprint (detail->>'fingerprint'), reason, ISIN, ex-date.
-  # 2026-11-01: 12 of the 31 removed, because code fixes resolved them and a fingerprint left here
-  # would silently re-accept a regression that raised it again: 10 an NSE amount stated as
-  # "<n> Per Share" with no currency marker, 2 "Special Interim Dividend" against BSE's interim
-  # (M2.3). The 19 below are feed disagreements still awaiting a human.
-  # 2026-11-01 (later): 17 more removed, resolved by the owner-approved rules for dividends the
-  # feeds state consistently (M2.3): 12 NSE records stating no amount against BSE's (rule A,
-  # silence yields), 4 equal money under different kind names (rule C) and ACC 2020-03-27, where
-  # BSE was the silent side (rule A). The 2 left are genuine conflicts - different money -
-  # awaiting a human: CORALFINAC (NSE Re 1 vs BSE Rs 0.20) and BEML (NSE Rs 12.28 vs BSE Rs 0.55).
-  # 2026-11-01 (evening): BEML removed. The owner ruled on BEML's own letter of 2026-08-07 (a
-  # revised final of Rs 12.28 inclusive of the May Rs 0.55) that BSE's Rs 0.55 is stale; the
-  # `superseded_dividends` row in manual_actions.yaml books NSE's Rs 12.28 once (M2.3). Only
-  # CORALFINAC is left.
-  # 2026-11-19: CORALFINAC ruled too (owner, 2026-11-16, HUMAN_DECISIONS.md D42): BSE's Rs 0.20
-  # per FV-2 share is booked and NSE's pre-split Re 1 superseded (manual_actions.yaml). Its open
-  # flag closes at the next CA finalize (the Saturday ca_refresh, 2026-11-21), which also
-  # recomputes the ISIN's factor chain; nothing re-reconciles by hand before then. So the
-  # fingerprint stays until that run, and `review_by` ends the acceptance the day after: from
-  # 2026-11-22 this set accepts nothing, and a regression that raised the flag again is red. Both
-  # D27 entries can then be deleted.
-  - id: d27-ca-reconciliation-backlog
-    kind: quality
-    target: ca_reconciliation
-    match:
-      fingerprints:
-        - 69102f228404b6f9cbe237d4bf3d38b1  # RATIO_MISMATCH INE558D01021 2017-09-06
-    remark: *d27_remark
-    basis: *d27_basis
-    since: 2026-09-07
-    review_by: 2026-11-21
-
-  # The check's own alert is a warning only while every open ERROR flag is in the set above.
-  - id: d27-ca-reconciliation-alert
-    kind: alert
-    target: quality:ca_reconciliation:red
-    match: {while_accepted: d27-ca-reconciliation-backlog}
-    remark: *d27_remark
-    basis: *d27_basis
-    since: 2026-09-07
-    review_by: 2026-11-21
+  # D27 (ca_reconciliation backlog) was retired on 2026-11-21: its last flag, CORALFINAC's
+  # (HUMAN_DECISIONS.md D42), closed at that day's ca_refresh, so the check accepts nothing.
 
   # ── D33: share-basis flags of the guard's first historical sweep, dated before 2026-11-01 ──
   - id: d33-share-basis-history-continuity

@@ -1,12 +1,11 @@
-"""D27 and D28 as registry entries: each accepts its own known set and nothing next to it.
+"""D27 retired, D28 as registry entries: each accepts its own known set and nothing next to it.
 
-D27 freezes 1 `ca_reconciliation` ERROR flag by fingerprint (31 until 2026-11-01, when code
-fixes resolved 12, the owner-approved consistent-dividend rules 17 more and the BEML ruling one;
-CORALFINAC's, the last, was ruled on 2026-11-16 (D42) and the entry expires after 2026-11-21, the
-Saturday CA finalize that closes its flag): a flag in the set
-is ACCEPTED on its own, a new disagreement never is, and the check (and its alert) turns amber
-only once every open ERROR flag is in the set. D28 accepts two sources' 404/empty-body failures
-only while the row is retryable and less than 7 days past its first attempt.
+D27 froze `ca_reconciliation` ERROR flags by fingerprint (31 from 2026-10-24; code fixes, the
+owner-approved consistent-dividend rules and the BEML ruling resolved all but one by 2026-11-01).
+The last, CORALFINAC's, was ruled on 2026-11-16 (D42) and its flag closed at the ca_refresh of
+2026-11-21, so the entry was deleted: no fingerprint is accepted any more, and a regression that
+raised any of them again is red, its check and alert with it. D28 accepts two sources' 404/
+empty-body failures only while the row is retryable and less than 7 days past its first attempt.
 """
 
 from __future__ import annotations
@@ -20,10 +19,11 @@ from dataplatform.clock import IST
 from dataplatform.status.console import data_render
 from dataplatform.status.deviations import (
     DeviationJudge,
+    DeviationKind,
+    DeviationOut,
     DeviationStatus,
     GapItem,
     OpenFlag,
-    QualityEntry,
     RetryWindow,
     load_deviations,
 )
@@ -32,8 +32,10 @@ from dataplatform.status.sync_state import SyncStateStore
 from dataplatform.store.db import Connection
 
 REGISTRY: Final = load_deviations()
-D27: Final = REGISTRY.get("d27-ca-reconciliation-backlog")
+#: What D27 targeted: no entry may target either any more.
+CA_TARGETS: Final = ("ca_reconciliation", "quality:ca_reconciliation:red")
 TODAY: Final = date(2026, 10, 24)
+#: CORALFINAC's, D27's last; its flag closed at the 2026-11-21 ca_refresh (D42).
 KNOWN: Final = "69102f228404b6f9cbe237d4bf3d38b1"  # RATIO_MISMATCH INE558D01021 2017-09-06
 #: Resolved by the "<n> Per Share" parser fix (2026-11-01) and so no longer accepted: a regression
 #: that raised it again must be red, not silently waved through.
@@ -87,48 +89,29 @@ def _flag(fingerprint: str | None) -> OpenFlag:
     )  # fmt: skip
 
 
-# ── D27 ────────────────────────────────────────────────────────────────────────────────────
+# ── D27 (retired 2026-11-21) ──────────────────────────────────────────────────────────────
 
 
-def test_d27_is_a_frozen_fingerprint_set_and_nothing_else() -> None:
-    assert isinstance(D27, QualityEntry)
-    match = D27.match
-    assert match.fingerprints is not None
-    assert match.fingerprints == frozenset({KNOWN})
-    assert RESOLVED not in match.fingerprints
-    assert RESOLVED_BY_RULE not in match.fingerprints
-    assert RESOLVED_BY_RULING not in match.fingerprints
-    assert match.ids is None and match.isins is None
-    assert match.raised_before is None and match.dated_before is None
-    assert D27.review_by == date(2026, 11, 21)
+def test_d27_is_gone_from_the_registry() -> None:
+    ids = {entry.id for entry in REGISTRY.deviations}
+    assert not {i for i in ids if i.startswith("d27-")}
+    assert not [e for e in REGISTRY.deviations if e.target in CA_TARGETS], "nothing replaced it"
 
 
-def test_a_flag_in_the_set_is_accepted_and_a_new_one_is_not() -> None:
-    judge = _judge()
-    accepted = judge.quality_flag("ca_reconciliation", _flag(KNOWN))
-    assert accepted is not None and accepted.status is DeviationStatus.ACCEPTED
-    assert "M2.3" in accepted.remark
-    assert judge.quality_flag("ca_reconciliation", _flag("0" * 32)) is None
-    assert judge.quality_flag("ca_reconciliation", _flag(None)) is None
-    assert judge.quality_flag("l2_continuity", _flag(KNOWN)) is None
+@pytest.mark.parametrize("fingerprint", [KNOWN, RESOLVED, RESOLVED_BY_RULE, RESOLVED_BY_RULING])
+@pytest.mark.parametrize("today", [TODAY, date(2026, 11, 21), date(2026, 11, 22)])
+def test_no_former_d27_fingerprint_is_accepted(fingerprint: str, today: date) -> None:
+    judge = _judge(today=today)
+    assert judge.quality_flag("ca_reconciliation", _flag(fingerprint)) is None
 
 
-def test_the_check_is_amber_only_when_every_open_flag_is_in_the_set() -> None:
-    mixed = _Flags(KNOWN, "0" * 32)
-    judge = _judge(mixed)
+def test_a_reraised_coralfinac_flag_keeps_the_check_and_its_alert_red() -> None:
+    conn = _Flags(KNOWN)
+    judge = _judge(conn)
     assert judge.quality("ca_reconciliation") is None
-    assert judge.quality_accepted("ca_reconciliation") == 1
+    assert judge.quality_accepted("ca_reconciliation") == 0
     assert judge.alert("quality:ca_reconciliation:red") is None  # the alert stays critical
-    only_known = _judge(_Flags(KNOWN))
-    assert only_known.quality("ca_reconciliation") is not None
-    assert only_known.alert("quality:ca_reconciliation:red") is not None
-
-
-def test_after_its_review_date_d27_accepts_nothing() -> None:
-    verdict = _judge(today=date(2026, 11, 22)).quality_flag("ca_reconciliation", _flag(KNOWN))
-    assert verdict is not None and verdict.status is DeviationStatus.EXPIRED
-    on_the_day = _judge(today=date(2026, 11, 21)).quality_flag("ca_reconciliation", _flag(KNOWN))
-    assert on_the_day is not None and on_the_day.accepted
+    assert conn.queries == 0, "no entry targets the check, so the judge reads nothing"
 
 
 def test_a_check_no_entry_targets_reads_nothing() -> None:
@@ -138,7 +121,11 @@ def test_a_check_no_entry_targets_reads_nothing() -> None:
 
 
 def test_the_quality_panel_counts_and_marks_accepted_flags_apart() -> None:
-    verdict = _judge().quality_flag("ca_reconciliation", _flag(KNOWN))
+    verdict = DeviationOut(
+        id="test-quality-entry", kind=DeviationKind.QUALITY, target="ca_reconciliation",
+        status=DeviationStatus.ACCEPTED, remark="a known flag", basis="test",
+        since=date(2026, 9, 7), review_by=None,
+    )  # fmt: skip
     check = CheckCountOut(
         check_name="ca_reconciliation", severity=QualitySeverity.ERROR, count=194,
         first_date=date(2001, 7, 23), last_date=date(2026, 10, 1), raised_today=0,

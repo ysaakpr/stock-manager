@@ -214,7 +214,6 @@ def test_the_checked_in_registry_loads_and_holds_the_bse_seeds() -> None:
     for entry in registry.deviations:
         decision = {
             "bse-": "D26",
-            "d27-": "D27",
             "d28-": "D28",
             "d31-": "D31",
             "d32-": "D32",
@@ -232,9 +231,10 @@ def test_the_checked_in_registry_loads_and_holds_the_bse_seeds() -> None:
 
 
 def test_every_entry_targets_what_its_decision_named() -> None:
-    """D26 is the BSE block, D27 the ca_reconciliation backlog, D28 two retrying sources only,
-    D31 and D32 the XBRL filings NSE never published, D33 the two share-basis checks, D34-D39
-    the per-filing XBRL failures of the 2026-11-02 triage (gaps of nse_xbrl_filing only)."""
+    """D26 is the BSE block, D28 two retrying sources only, D31 and D32 the XBRL filings NSE
+    never published, D33 the two share-basis checks, D34-D39 the per-filing XBRL failures of the
+    2026-11-02 triage (gaps of nse_xbrl_filing only). D27, the ca_reconciliation backlog, was
+    retired on 2026-11-21: an entry prefixed `d27-` has no allowed target and fails here."""
     allowed: dict[str, Callable[[str], bool]] = {
         "bse-": lambda target: (
             "bse" in target
@@ -246,7 +246,6 @@ def test_every_entry_targets_what_its_decision_named() -> None:
                 "job:announcements_capture:failed",
             )
         ),
-        "d27-": lambda target: target in ("ca_reconciliation", "quality:ca_reconciliation:red"),
         "d28-": lambda target: target in ("nse_xbrl_filing", "gdelt_v2_event_files"),
         "d31-": lambda target: target == "nse_xbrl_filing",
         "d32-": lambda target: target == "nse_xbrl_filing",
