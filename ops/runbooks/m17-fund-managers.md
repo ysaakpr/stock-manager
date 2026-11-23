@@ -59,6 +59,26 @@ kill-switch path; nothing here can reach a real broker. All times are **IST**.
 Holidays are skipped inside the job (the NSE holiday calendar). A rerun of a completed session is a
 no-op; a red session can be rerun once the data heals.
 
+### Special sessions (anomaly A5, owner ruling 2026-11-23, D45)
+
+A special session, such as NSE's one-hour Diwali Muhurat session, is **not** an M17 decision
+session. The desk does not decide on it, and nothing fills at it. An order staged on the decision
+session before it fills at the **next regular session's open**. Special sessions also do not count
+toward S0 + 62.
+
+- **Example.** Muhurat was on Sun 8 Nov 2026, and L1 has bars for it. The Fri 6 Nov `FM-SWING-BRK`
+  order for `INE068V01023` filled at the Mon 9 Nov open (₹3,147.00), not at the Muhurat open
+  (`ops/gates/M17-dry-run-2026-11-13.md`, A5).
+- **How the code enforces it.**
+  - The desk's calendar is `TradingCalendar.expected_sessions`, which leaves out Muhurat and the
+    declared `special_sessions:`.
+  - `LakeM17World.is_session`, `next_session` and the fill market all read that calendar.
+  - The Mon-Fri cron never fires on a weekend session. A weekday fire on one returns `HOLIDAY`,
+    and `owed_m17_session` maps it back to the regular session before.
+  - `tests/unit/test_fm_special_sessions.py` pins all of this.
+- **Do not** add a Muhurat or other special-session date as a session for this job. The rule is the
+  owner's, so a change to it needs a new owner ruling.
+
 ## Streams: dry run and live
 
 - **Until M17.8's go the registered job runs the dry stream** (`M17_DRY_RUN = True` in
