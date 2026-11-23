@@ -125,6 +125,16 @@ names outside the shortlist, which is one of the things being tested. The contro
 **Deadline:** a manager that has not finished by 08:30 IST on the next session journals
 `MISSED_SESSION` and stages nothing for that session. There is no catch-up trading on a stale view.
 
+*Note, 2026-11-23: what "session" means here (owner ruling 2026-11-23; HUMAN_DECISIONS.md D45;
+dry-run anomaly A5).* This note clarifies the wording above. It does not amend it. Here and in §6, a
+session is a **regular** NSE trading session. A special or ceremonial session, such as the
+one-hour Diwali Muhurat session, is not a decision session. "Next session's open" (step 6 and the
+deadline) means the next regular session's open. Special sessions are also not counted in S0 + 62.
+Example: the Fri 6 Nov 2026 dry-run order filled at the Mon 9 Nov open, not at the Sun 8 Nov
+Muhurat session. The desk ran this way from the first dry session, because its calendar
+(`expected_sessions`) has always left special sessions out. So nothing in the mandates, prompts,
+roster or rails changes, and **no hash changes**: the 21 books' S0 hashes stand.
+
 ## 5. Web access
 
 The manager never browses. It names queries or URLs, and the **Commons fetcher** runs them. The

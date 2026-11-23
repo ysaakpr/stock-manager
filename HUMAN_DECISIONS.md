@@ -1199,6 +1199,31 @@ Their red is the owner's informed choice, not an open question. The 710 `Missing
 filings are a separate item (a re-fetch is owner-gated) and are not part of this ruling. Task
 M14.3.
 
+### D45 — M17 anomaly A5: a special (Muhurat) session is not a decision session → **ANSWERED (owner, 2026-11-23): "all yes" to the recommendation.**
+
+The M17.8 dry-run report (`ops/gates/M17-dry-run-2026-11-13.md`, anomaly A5) found an unwritten
+rule. NSE held its one-hour Diwali Muhurat session on Sun 8 Nov 2026, and L1 has bars for it. The
+desk did not decide on it and journaled nothing for it. The Fri 6 Nov `FM-SWING-BRK` order for
+`INE068V01023` filled at the **Mon 9 Nov open (₹3,147.00)**, not at the Muhurat open. The report
+recommended that the owner confirm this and that it be written down.
+
+Ruled:
+* A special or ceremonial session, such as NSE's Diwali Muhurat session, is **not** an M17 decision
+  session. The desk decides nothing on it, and no order fills at it.
+* An order staged on the decision session before it fills at the **next regular session's open**.
+* Special sessions are not sessions in the pre-registration's count (S0 to S0 + 62).
+
+What it changes: no code. The desk already works this way. Its calendar is
+`TradingCalendar.expected_sessions`, which leaves out Muhurat and declared special sessions, and
+`LakeM17World`'s session checks and fill market both read it. The rule is now written down:
+* in `ops/runbooks/m17-fund-managers.md` ("Special sessions");
+* in a dated note in the pre-registration's §4
+  (`ops/studies/preregistration-m17-ai-fund-managers-2026-10-09.md`);
+* in the test that pins it, `tests/unit/test_fm_special_sessions.py`.
+
+The mandates, prompts, roster, rails and the 21 mandate hashes are unchanged. It does not affect the
+dry run's count either: the five counted sessions were the five regular sessions. Task M17.8.
+
 ---
 
 ## Coming up
