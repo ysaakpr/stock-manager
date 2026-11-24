@@ -2,11 +2,14 @@
 
 BN Agrochem (NSE BNAGROCHEM) split ₹10 → ₹1 ex 2026-11-16 and its ISIN was reissued
 INE00HZ01011 → INE00HZ01029. The broken state is not hand-built: the real ingest runs over the cut
-— the Saturday 2026-11-14 snapshot (old ISIN), then the 2026-11-21 one (new ISIN) with the L0
-series as reissue evidence — and reproduces what the 07:00 IST `identity_refresh` stored live:
-the last old capture is a Saturday, no session lies between it and Monday's switch, so the series
-refuses (`session_disagrees`), the new ISIN's window is stored from the 2026-04-20 listing date and
-the overlap is queued. The repair must then leave precisely the target master.
+— the Saturday 2026-11-14 snapshot (old ISIN), then the 2026-11-21 one (new ISIN) — and reproduces
+what the 07:00 IST `identity_refresh` stored live. Live, the last old capture was a Saturday, no
+session lay between it and Monday's switch, so the series refused (`session_disagrees`), the new
+ISIN's window was stored from the 2026-04-20 listing date and the overlap was queued. The series
+now reaches back past a non-session capture to Friday's bhavcopy and answers itself
+(`test_the_fixed_ingest_places_the_boundary_itself`), so the broken state is reproduced by the
+same ingest with no reissue evidence — the identical no-boundary path. The repair must then leave
+precisely the target master, and a re-run over the repaired store must change nothing.
 
 Runs against a scratch database created for the session and dropped afterwards, never the
 developer's `trading` database; each test rolls back. The L0 lake is a `tmp_path`.
@@ -31,6 +34,7 @@ from dataplatform.clock import IST, FrozenClock
 from dataplatform.config import Settings
 from dataplatform.identity.ingest import (
     NSE_EQUITY_LIST_SOURCE,
+    IdentityIngestReport,
     L0EquityListSeries,
     equity_list_filename,
     identity_l0_files,
@@ -151,7 +155,10 @@ def lake(tmp_path: Path) -> L0Store:
 
 @pytest.fixture
 def broken(conn: Connection, lake: L0Store) -> IdentityStore:
-    """The store as the 2026-11-21 07:00 IST ingest left it — produced by the real ingest."""
+    """The store as the 2026-11-21 07:00 IST ingest left it — produced by the real ingest.
+
+    With no reissue evidence: the series no longer refuses this cut, and no evidence is the very
+    path its refusal took (`identity.reissue.no_boundary`, windows left as derived)."""
     equity_list, changes = read_snapshot_from_l0(BEFORE, store=lake)
     ingest_snapshot(
         conn,
@@ -167,9 +174,9 @@ def broken(conn: Connection, lake: L0Store) -> IdentityStore:
         symbol_changes=changes,
         snapshot_date=SNAPSHOT,
         clock=CLOCK,
-        reissue_evidence=L0EquityListSeries(lake),
+        reissue_evidence=None,
     )
-    # The defect, reproduced: Saturday's capture has no session after it before the switch.
+    # The live defect's result, reproduced: no boundary, the listing-date window, one conflict.
     assert not report.reissues
     assert {(c.symbols, c.on_date) for c in report.conflicts} == {
         ((SYMBOL,), date(2026, 4, 20)),
@@ -314,6 +321,55 @@ def test_a_second_run_and_the_normal_ingest_are_no_ops(
         assert not report.refusals
     assert _nse_windows(conn) == TARGET
     assert _open_conflicts(conn) == []
+    # The MANUAL edge is the only one: the series now answers too, but lineage wins and nothing
+    # writes a second edge.
+    assert conn.execute(
+        "SELECT predecessor_isin, successor_isin, effective_date, detected_by FROM isin_lineage"
+    ).fetchall() == [(OLD, NEW, SWITCH, "MANUAL")]
+
+
+def _ingest(conn: Connection, lake: L0Store, on_date: date, snapshot: date) -> IdentityIngestReport:
+    equity_list, changes = read_snapshot_from_l0(snapshot, store=lake)
+    return ingest_snapshot(
+        conn,
+        equity_list=equity_list,
+        symbol_changes=changes,
+        snapshot_date=on_date,
+        clock=FrozenClock(datetime.combine(on_date, datetime.min.time(), tzinfo=IST)),
+        reissue_evidence=L0EquityListSeries(lake),
+    )
+
+
+def test_the_fixed_ingest_places_the_boundary_itself(conn: Connection, lake: L0Store) -> None:
+    """The root cause fixed: Saturday's capture is no session, so the series reaches back to
+    Friday's bhavcopy (old ISIN), Monday's trades the new one, and the refresh resolves the
+    boundary to the first new session — the target master, no conflict, no repair needed."""
+    equity_list, changes = read_snapshot_from_l0(BEFORE, store=lake)
+    ingest_snapshot(
+        conn,
+        equity_list=equity_list,
+        symbol_changes=changes,
+        snapshot_date=BEFORE,
+        clock=CLOCK_BEFORE,
+    )
+    report = _ingest(conn, lake, SNAPSHOT, SNAPSHOT)
+    assert report.is_clean, report.conflicts
+    assert [
+        (b.symbol, b.old_isin, b.new_isin, b.effective, b.evidence) for b in report.reissues
+    ] == [(SYMBOL, OLD, NEW, SWITCH, "nse_equity_list_series")]
+    assert _nse_windows(conn) == TARGET
+    assert _open_conflicts(conn) == []
+    master = IdentityStore(conn, clock=CLOCK).load_master()
+    assert master.resolve(SYMBOL, date(2026, 11, 13)) == OLD
+    assert master.resolve(SYMBOL, date(2026, 11, 15)) == OLD
+    assert master.resolve(SYMBOL, SWITCH) == NEW
+
+    # Re-running it, and next Saturday's refresh, is a no-op.
+    for on_date in (SNAPSHOT, date(2026, 11, 28)):
+        again = _ingest(conn, lake, on_date, SNAPSHOT)
+        assert again.is_clean, again.conflicts
+        assert (again.counts.windows_inserted, again.counts.windows_closed) == (0, 0)
+    assert _nse_windows(conn) == TARGET
 
 
 def test_the_dry_run_plans_inside_a_read_only_transaction(
