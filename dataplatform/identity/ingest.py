@@ -62,6 +62,7 @@ from dataplatform.identity.master import (
     detect_conflicts,
     plan_history,
 )
+from dataplatform.ingest.calendar import CalendarCoverageError, TradingCalendar, trading_calendar
 from dataplatform.logging import get_logger
 from dataplatform.store.db import Connection, connection
 from dataplatform.store.l0 import L0Error, L0Store
@@ -630,9 +631,13 @@ class L0EquityListSeries:
     requires the bhavcopy of that date to trade the symbol as the new ISIN, and the last
     bhavcopy between the two captures that trades it to show the old one.
     What it assumes: the series is the daily capture `ingest.daily_snapshot` keeps (~19:15 IST,
-    after the close). The capture can therefore already show the ISIN the *next* session will
-    trade under — a day early — and the bhavcopy check is what catches that: the session must
-    agree, or there is no answer. A missing capture file only makes the answer later.
+    after the close), plus the Saturday capture `identity_refresh` takes itself. The capture can
+    therefore already show the ISIN the *next* session will trade under — a day early — and the
+    bhavcopy check is what catches that: the session must agree, or there is no answer. A missing
+    capture file only makes the answer later. A last old capture on a day the exchange published
+    no bhavcopy (a weekend, a holiday — the platform `TradingCalendar` decides) says nothing a
+    session can confirm, so the check reaches back past it to the last session that did: the
+    BNAGROCHEM shape (2026-11-21), Saturday capture old, Monday bhavcopy new, Friday old.
     What it never does: bridge a capture where the symbol is absent (a symbol that went away and
     came back is not proven to be the same security), answer from a series that starts on the new
     ISIN, flips more than once, or disagrees with the bhavcopy — all `None`, so the overlap is
@@ -640,8 +645,9 @@ class L0EquityListSeries:
     parsed once.
     """
 
-    def __init__(self, store: L0Store) -> None:
+    def __init__(self, store: L0Store, *, calendar: TradingCalendar | None = None) -> None:
         self._store = store
+        self._calendar = calendar
         self._parsed: dict[date, dict[str, str]] = {}
         self._sessions: dict[date, dict[str, frozenset[str]] | None] = {}
 
@@ -678,11 +684,14 @@ class L0EquityListSeries:
         self, symbol: str, old_isin: str, new_isin: str, last_old: date, first_new: date
     ) -> bool:
         """Session `first_new` trades `symbol` as `new_isin` only, and the last session in
-        `[last_old, first_new)` that trades it at all shows `old_isin` only. Fails closed."""
+        `[floor, first_new)` that trades it at all shows `old_isin` only — `floor` is `last_old`,
+        or the last session before it when `last_old` was no session (`_evidence_floor`). Fails
+        closed."""
         on_switch = self._session(first_new)
         before: frozenset[str] | None = None
+        floor = self._evidence_floor(symbol, last_old)
         day = first_new - timedelta(days=1)
-        while day >= last_old and before is None:
+        while day >= floor and before is None:
             session = self._session(day)
             if session is not None and symbol in session:
                 before = session[symbol]
@@ -697,10 +706,40 @@ class L0EquityListSeries:
             old_isin=old_isin,
             new_isin=new_isin,
             capture=first_new.isoformat(),
+            last_old_capture=last_old.isoformat(),
+            evidence_floor=floor.isoformat(),
             session_isins=None if switch_isins is None else sorted(switch_isins),
             before_isins=None if before is None else sorted(before),
         )
         return False
+
+    def _evidence_floor(self, symbol: str, last_old: date) -> date:
+        """The earliest session whose bhavcopy may confirm the old ISIN: `last_old` itself when
+        the exchange published data that day, else the last day before it that it did.
+
+        A capture taken on a weekend or holiday (the Saturday `identity_refresh` capture) lists
+        what the last session closed on; with no session of its own, `[last_old, first_new)`
+        can hold none, and a reissue effective the next session — any Monday-effective split —
+        was refused for want of evidence that was one day further back. Only non-session days
+        are crossed, so a real gap of sessions between the captures still has to be covered by
+        the bhavcopies exactly as before. A date the calendar does not cover is never guessed
+        at: the floor stays `last_old`, which is the old, stricter answer.
+        """
+        calendar = trading_calendar() if self._calendar is None else self._calendar
+        day = last_old
+        try:
+            while not calendar.expects_data(day):
+                day -= timedelta(days=1)
+        except CalendarCoverageError as error:
+            _log.warning(
+                "identity.reissue.calendar_uncovered",
+                source=_UDIFF_SOURCE,
+                symbol=symbol,
+                last_old_capture=last_old.isoformat(),
+                error=str(error),
+            )
+            return last_old
+        return day
 
     def _session(self, on_date: date) -> dict[str, frozenset[str]] | None:
         """`symbol -> ISINs` traded in the L0 cash bhavcopy for `on_date`; `None` if none stored."""

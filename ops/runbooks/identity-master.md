@@ -82,7 +82,11 @@ To resolve one you have to decide which claim is wrong, which means looking at t
   before it showed the old. Series evidence counts only within one issuer code (`isin[:7]`), and
   a capture without the symbol breaks it. The L0 bhavcopy of that date must also trade the
   symbol as the new ISIN, because the ~19:15 IST capture can list the next session's ISIN a day
-  early. A still-queued conflict between two ISINs of one issuer (`INE887D01016` /
+  early, and the last session that trades the symbol from the last old capture up to the switch
+  must show the old ISIN only. A last old capture taken on a day with no session (the Saturday
+  `identity_refresh` capture, a holiday) is confirmed by the last session before it, per the
+  platform trading calendar, so a Monday-effective reissue resolves itself (2026-11-24). A
+  still-queued conflict between two ISINs of one issuer (`INE887D01016` /
   `INE887D01024`) means that evidence was missing or disagreed. Once the switch session is
   confirmed, add the edge (`isin_lineage`, `detected_by = 'MANUAL'`), then re-run
   `identity.ingest --from-l0`. Do not hand-edit windows. Two *different* issuer codes under one
@@ -255,8 +259,14 @@ and the new one from 2026-11-16. The refresh failed for a reason that will recur
   `L0EquityListSeries` confirms the old ISIN against sessions in [last old capture, first new
   capture). Starting on a Saturday, there is no session in that range (`session_disagrees`,
   `before_isins=None`).
-* So a reissue that takes effect on a Monday fails this way until that check also looks back past
-  a non-session capture.
+* So a reissue that takes effect on a Monday failed this way until that check also looked back
+  past a non-session capture. **Fixed 2026-11-24:** when the last old capture is a day the
+  trading calendar expects no bhavcopy for, the check reaches back to the last day it does (Friday,
+  or further across a holiday) and confirms the old ISIN there. Only non-session days are crossed;
+  every other refusal stands — both ISINs on one session, a missing bhavcopy for a session, a
+  symbol not trading on that last session, a capture outside the calendar's coverage (the old,
+  stricter answer, logged `identity.reissue.calendar_uncovered`). The BNAGROCHEM cut now resolves
+  to 2026-11-16 in the ingest itself; its MANUAL edge keeps a re-run a no-op.
 
 The refresh stored `symbol_history` 11646 (INE00HZ01029 from 2026-04-20) and queued reconciliation
 84 (INGEST). At 10:00 IST, `ca_refresh` held the split back on that conflict and queued 85 (RESOLVE,

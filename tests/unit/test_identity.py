@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import io
 import zipfile
+from dataclasses import replace
 from datetime import date, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
@@ -54,6 +55,7 @@ from dataplatform.identity.master import (
     detect_conflicts,
     plan_history,
 )
+from dataplatform.ingest.calendar import TradingCalendar, trading_calendar
 from dataplatform.store.l0 import L0Store
 
 FIXTURES = Path(__file__).resolve().parents[1] / "fixtures" / "nse_equity_list" / "2026-08-08"
@@ -872,3 +874,193 @@ def test_a_switch_with_no_session_bhavcopy_is_refused(tmp_path: Path) -> None:
         L0EquityListSeries(store).first_listed("TCC", TCC_OLD, TCC_NEW, through=REISSUE_SNAPSHOT)
         is None
     )
+
+
+# ── a last old capture on a day with no session (BNAGROCHEM, 2026-11-21) ─────────────────────
+#
+# BN Agrochem split ₹10 → ₹1 ex Mon 2026-11-16 and its ISIN was reissued. The last capture listing
+# the old ISIN was the Saturday one `identity_refresh` takes itself; `[Sat, Mon)` holds no session,
+# so the bhavcopy check found nothing to confirm the old ISIN against and refused. The calendar says
+# Saturday is no session, so the check now reaches back to Friday's bhavcopy — and only that far.
+
+BNA = "BNAGROCHEM"
+BNA_OLD = "INE00HZ01011"
+BNA_NEW = "INE00HZ01029"
+BNA_FRI, BNA_SAT, BNA_MON = date(2026, 11, 13), date(2026, 11, 14), date(2026, 11, 16)
+BNA_SNAPSHOT = date(2026, 11, 21)
+
+#: The live L0 shape: captures Fri/Sat old, Mon/Sat new; sessions Thu/Fri old, Mon/Tue new.
+_BNA_CAPTURES: dict[date, str | None] = {
+    BNA_FRI: BNA_OLD,
+    BNA_SAT: BNA_OLD,
+    BNA_MON: BNA_NEW,
+    BNA_SNAPSHOT: BNA_NEW,
+}
+_BNA_SESSIONS = {
+    date(2026, 11, 12): BNA_OLD,
+    BNA_FRI: BNA_OLD,
+    BNA_MON: BNA_NEW,
+    date(2026, 11, 17): BNA_NEW,
+}
+
+
+def _bna_first_listed(
+    tmp_path: Path,
+    captures: dict[date, str | None] = _BNA_CAPTURES,
+    sessions: dict[date, str] = _BNA_SESSIONS,
+    *,
+    old: str = BNA_OLD,
+    new: str = BNA_NEW,
+    calendar: TradingCalendar | None = None,
+) -> date | None:
+    store = _series_store(tmp_path, captures, sessions, symbol=BNA)
+    return L0EquityListSeries(store, calendar=calendar).first_listed(
+        BNA, old, new, through=BNA_SNAPSHOT
+    )
+
+
+def test_a_saturday_last_old_capture_is_confirmed_by_fridays_session(tmp_path: Path) -> None:
+    assert _bna_first_listed(tmp_path) == BNA_MON
+
+
+def test_the_saturday_shape_resolves_with_no_conflict_and_the_right_direction(
+    tmp_path: Path,
+) -> None:
+    """End to end through `resolve_reissues`: the boundary is the Monday, A closes on Sunday,
+    nothing is queued — and the direction is pinned on both sides, so an inverted boundary (or
+    swapped ISINs) fails here."""
+    stored = (SymbolWindow(Exchange.NSE, BNA, date(2026, 4, 20), None, BNA_OLD, "EQ"),)
+    derived = derive_master(
+        parse_equity_list(
+            _equity_list_text(f"{BNA},BN Agrochem Limited,EQ,20-APR-2026,1,1,{BNA_NEW},1")
+        ),
+        snapshot_date=BNA_SNAPSHOT,
+    )
+    resolution = resolve_reissues(
+        derived.windows,
+        stored,
+        listed_isins=frozenset(s.isin for s in derived.securities),
+        lineage={},
+        snapshot_date=BNA_SNAPSHOT,
+        evidence=L0EquityListSeries(
+            _series_store(tmp_path, _BNA_CAPTURES, _BNA_SESSIONS, symbol=BNA)
+        ),
+    )
+    assert resolution.unresolved == ()
+    assert resolution.boundaries == (
+        ReissueBoundary(Exchange.NSE, BNA, BNA_OLD, BNA_NEW, BNA_MON, REISSUE_EVIDENCE_EQUITY_LIST),
+    )
+    plan = plan_history(stored, resolution.windows)
+    applied = plan.applied_to(stored)
+    assert detect_conflicts(applied, source="test") == ()
+    assert [(w.isin, w.valid_to) for w in plan.closes] == [(BNA_OLD, date(2026, 11, 15))]
+    assert [(w.isin, w.valid_from, w.valid_to) for w in plan.inserts] == [(BNA_NEW, BNA_MON, None)]
+    master = IdentityMaster(applied)
+    assert master.try_resolve(BNA, BNA_FRI) == BNA_OLD
+    assert master.try_resolve(BNA, date(2026, 11, 15)) == BNA_OLD
+    assert master.try_resolve(BNA, BNA_MON) == BNA_NEW
+    assert master.try_resolve(BNA, date(2026, 11, 17)) == BNA_NEW
+
+
+def test_the_saturday_shape_with_the_isins_swapped_is_refused(tmp_path: Path) -> None:
+    assert _bna_first_listed(tmp_path, old=BNA_NEW, new=BNA_OLD) is None
+
+
+def test_the_saturday_shape_with_the_sessions_inverted_is_refused(tmp_path: Path) -> None:
+    """Captures say old → new, but Friday traded the new ISIN and Monday the old one."""
+    inverted = {d: (BNA_NEW if i == BNA_OLD else BNA_OLD) for d, i in _BNA_SESSIONS.items()}
+    assert _bna_first_listed(tmp_path, sessions=inverted) is None
+
+
+@pytest.mark.parametrize(
+    ("fri", "mon"),
+    [
+        ((BNA_OLD, BNA_NEW), (BNA_NEW,)),  # both ISINs on Friday
+        ((BNA_OLD,), (BNA_OLD, BNA_NEW)),  # both ISINs on Monday
+    ],
+    ids=["both-on-friday", "both-on-monday"],
+)
+def test_the_saturday_shape_with_both_isins_on_one_session_is_refused(
+    tmp_path: Path, fri: tuple[str, ...], mon: tuple[str, ...]
+) -> None:
+    store = _series_store(tmp_path, _BNA_CAPTURES, {date(2026, 11, 12): BNA_OLD}, symbol=BNA)
+    for on_date, isins in ((BNA_FRI, fri), (BNA_MON, mon)):
+        name, payload = _udiff_multi_zip(on_date, [(BNA, isin) for isin in isins])
+        store.put("nse_bhavcopy_udiff", on_date, name, payload)
+    assert (
+        L0EquityListSeries(store).first_listed(BNA, BNA_OLD, BNA_NEW, through=BNA_SNAPSHOT) is None
+    )
+
+
+def test_the_saturday_shape_without_fridays_bhavcopy_is_refused(tmp_path: Path) -> None:
+    """Friday is a session the calendar expects; its file missing from L0 is a gap, not a pass —
+    and the look-back never goes past the one session before the capture to Thursday."""
+    sessions = {d: i for d, i in _BNA_SESSIONS.items() if d != BNA_FRI}
+    assert _bna_first_listed(tmp_path, sessions=sessions) is None
+
+
+def test_the_saturday_shape_with_the_symbol_suspended_on_friday_is_refused(
+    tmp_path: Path,
+) -> None:
+    """Friday's bhavcopy is there but does not trade the symbol: no session confirms the old
+    ISIN after Thursday, so — exactly as before — there is no answer."""
+    store = _series_store(tmp_path, _BNA_CAPTURES, {date(2026, 11, 12): BNA_OLD}, symbol=BNA)
+    for on_date, rows in ((BNA_FRI, []), (BNA_MON, [(BNA, BNA_NEW)])):
+        name, payload = _udiff_multi_zip(on_date, rows)
+        store.put("nse_bhavcopy_udiff", on_date, name, payload)
+    assert (
+        L0EquityListSeries(store).first_listed(BNA, BNA_OLD, BNA_NEW, through=BNA_SNAPSHOT) is None
+    )
+
+
+def test_a_capture_the_calendar_does_not_cover_keeps_the_old_refusal(tmp_path: Path) -> None:
+    """No calendar claim about Saturday: never guessed to be closed, so the old, stricter answer."""
+    narrow = replace(trading_calendar(), coverage_end=BNA_FRI)
+    assert _bna_first_listed(tmp_path, calendar=narrow) is None
+
+
+#: Ganesh Chaturthi, Mon 2026-09-14, is an NSE holiday: a reissue effective Tue 2026-09-15.
+_HOLIDAY_FRI, _HOLIDAY_SAT = date(2026, 9, 11), date(2026, 9, 12)
+_HOLIDAY_MON, _HOLIDAY_TUE = date(2026, 9, 14), date(2026, 9, 15)
+
+
+@pytest.mark.parametrize(
+    "monday_capture", [False, True], ids=["no-holiday-capture", "holiday-capture"]
+)
+def test_a_reissue_effective_after_a_monday_holiday_resolves_to_tuesday(
+    tmp_path: Path, monday_capture: bool
+) -> None:
+    assert not trading_calendar().expects_data(_HOLIDAY_MON)
+    captures: dict[date, str | None] = {
+        _HOLIDAY_FRI: BNA_OLD,
+        _HOLIDAY_SAT: BNA_OLD,
+        _HOLIDAY_TUE: BNA_NEW,
+        date(2026, 9, 19): BNA_NEW,
+    }
+    if monday_capture:
+        captures[_HOLIDAY_MON] = BNA_OLD
+    sessions = {_HOLIDAY_FRI: BNA_OLD, _HOLIDAY_TUE: BNA_NEW}
+    assert _bna_first_listed(tmp_path, captures, sessions) == _HOLIDAY_TUE
+
+
+def test_a_weekday_last_old_capture_is_not_widened(tmp_path: Path) -> None:
+    """A last old capture on a session day keeps `[last_old, first_new)`: Friday's capture old,
+    Friday's file missing, Thursday's trading the old ISIN — refused, exactly as before."""
+    captures: dict[date, str | None] = {BNA_FRI: BNA_OLD, BNA_MON: BNA_NEW}
+    sessions = {date(2026, 11, 12): BNA_OLD, BNA_MON: BNA_NEW}
+    assert _bna_first_listed(tmp_path, captures, sessions) is None
+
+
+def _udiff_multi_zip(on_date: date, rows: list[tuple[str, str]]) -> tuple[str, bytes]:
+    """`_udiff_zip` with any number of rows per symbol (both ISINs on one session), plus ACME."""
+    day = on_date.isoformat()
+    body = "".join(
+        f"{day},{day},CM,NSE,STK,{n},{isin},{symbol},EQ,,,,,{symbol} LTD,10.00,11.00,9.00,"
+        "10.50,10.50,10.00,,10.50,,,100,1050.00,10,F1,1,,,,,\n"
+        for n, (symbol, isin) in enumerate([*rows, ("ACME", "INE111A01017")], start=1)
+    )
+    name = f"BhavCopy_NSE_CM_0_0_0_{on_date.strftime('%Y%m%d')}_F_0000.csv"
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w") as archive:
+        archive.writestr(name, _UDIFF_HEADER + "\n" + body)
+    return name + ".zip", buffer.getvalue()

@@ -17,7 +17,9 @@ the same repair for any pair, given only the two ISINs, the switch session and t
 First case: BN Agrochem (NSE BNAGROCHEM), INE00HZ01011 → INE00HZ01029 on a ₹10 → ₹1 split ex
 2026-11-16. The last old capture was the Saturday 2026-11-14 one, so the series' bhavcopy check
 found no session between it and Monday's switch and refused (`session_disagrees`,
-`before_isins=None`), and the 2026-11-21 refresh stored the listing-date window.
+`before_isins=None`), and the 2026-11-21 refresh stored the listing-date window. That check now
+reaches back past a non-session capture to the last session's bhavcopy (2026-11-24), so this shape
+resolves in the refresh itself; the command remains for a reissue the series cannot evidence.
 
 What it requires of L0 before it plans anything (`read_switch`; every payload re-checksummed):
 

@@ -33,9 +33,12 @@ request was made to build this: it was cut from `data/L0` on 2026-11-21.
 | 2026-11-16 | INE00HZ01029, face value 1 | `d99b125033700564a93a82b54351436d8d11598ef97899673b79aab0ea10382b` |
 | 2026-11-21 | INE00HZ01029, face value 1 (the snapshot the broken ingest read) | `9a583c3c9e5be66d21a29af998714504d9b684a5a64b6da63daded5372a13016` |
 
-The last old capture is the Saturday one, so `L0EquityListSeries` looks for a session in
-[2026-11-14, 2026-11-16) to confirm the old ISIN, finds none, and refuses. That is the defect the
-test reproduces.
+The last old capture is the Saturday one, so `L0EquityListSeries` looked for a session in
+[2026-11-14, 2026-11-16) to confirm the old ISIN, found none, and refused — the live defect. Since
+2026-11-24 it reaches back past a non-session capture to Friday 2026-11-13's bhavcopy, and the
+ingest over this cut resolves the boundary to 2026-11-16 itself
+(`test_the_fixed_ingest_places_the_boundary_itself`); the broken state the repair tests start
+from is reproduced with no evidence.
 
 ## `nse_symbol_changes/symbolchange_20261121.csv`
 
