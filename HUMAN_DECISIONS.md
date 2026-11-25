@@ -1224,6 +1224,53 @@ What it changes: no code. The desk already works this way. Its calendar is
 The mandates, prompts, roster, rails and the 21 mandate hashes are unchanged. It does not affect the
 dry run's count either: the five counted sessions were the five regular sessions. Task M17.8.
 
+### D46 — Hand-link the filing history of the 27 NIFTY 500 names still on an old or bond ISIN → **ANSWERED (owner, 2026-11-23): "yes".**
+
+PR #172 (DQ-ISIN, 10 Nov) re-keyed NSE's board-meeting, announcement and shareholding feeds through
+`isin_lineage` and recovered 102 of the 129 NIFTY 500 names that had no results date in the M17
+dossiers. 27 were left, because no lineage edge exists to walk:
+
+* **23 reissued before the NSE ISIN era** (the bhavcopy printed no ISIN before 2011-06-22): APOLLOHOSP,
+  ASTRAL, AUROPHARMA, BALKRISIND, BRITANNIA, COROMANDEL, EIDPARRY, EMAMILTD, ENGINERSIN, HAVELLS,
+  HINDZINC, KEC, KOTAKBANK, LICHSGFIN, LUPIN, MMTC, NATIONALUM, ONGC, PFOCUS, REDINGTON, SUNPHARMA,
+  SUPREMEIND, TVSMOTOR.
+* **4 that file under a debenture ISIN**: HUDCO, IREDA, IRFC, TATACAP.
+
+Ruled: link them by hand, each only where L0/L1 evidence proves it.
+
+What it changes (task M18.1, `dataplatform/identity/link_filing_history.py`):
+* **The 23:** one MANUAL `isin_lineage` edge each, old ISIN → the ISIN the symbol traded as from the
+  reissue (`dataplatform/identity/pre_era_lineage.yaml`, provenance "owner ruling 2026-11-23").
+  Proof, for every entry: one issuer code, serial + 1; every L1 filing under the old ISIN names the
+  symbol; the old ISIN is in no master row, window, edge, L1 price row or `EQUITY_L` capture; the
+  symbol trades as the successor alone from the first ISIN-era session; the effective date is the
+  successor's first NSE session in L1, 4–6 sessions after the stored pre-era split for 21 of them
+  (HAVELLS and TVSMOTOR have no stored split, so their date is the first session L1 already keys to
+  the successor). For ASTRAL, BRITANNIA, HAVELLS and KOTAKBANK the successor is the retired middle of
+  an L1 edge already stored. It is registered DELISTED from its L1 EQ bars (`lineage_backfill`, as a
+  rebuild would register it), and the chain carries the filings on to the live ISIN.
+* **The 4:** not reissues, so no lineage edge. A new curated table `filing_aliases.yaml` maps the
+  filed bond ISIN to the issuer's equity for the filing resolver alone, from the equity's first NSE
+  session. Proof: same issuer code; the equity is the issuer code's only ACTIVE equity and carries the
+  symbol; NSE printed the bond under that symbol; every filing under it names the symbol.
+* All 27 passed. None was refused.
+* `filing_rekey` moved only these names' rows: 205 board meetings, 464 announcements and 3
+  shareholding rows. 5 more shareholding rows are counted `duplicate` (the master lists the company
+  under both ISINs with identical figures).
+
+**M17 (pre-registration §7).** The filing feeds are Commons data the managers read. They are not a
+`mandate_hash` input. §7 allows a Commons fix mid-window, journaled with the session range it
+affected. It is recorded in `ops/runbooks/m17-fund-managers.md` ("Commons fixes mid-window").
+Sessions S0 (2026-11-18) to 2026-11-24 were decided without these names' filings; from the
+2026-11-25 session on, the dossiers carry them. Decisions already made stand. The 21 mandate hashes,
+prompts, rails, roster and paper books are unchanged.
+
+**Side effect, by design.** NSE's corporate-action feed also states these companies' original ISIN, so
+those rows were held back at ingest. With the edges in place, `ca_refresh` files them against the
+survivor (`filed_against_isin` = the old ISIN), as it already does for 290 reissues. Until now these
+names had only BSE's rows, and BSE is blocked since 2026-09-24, so their dividends since then were
+missing. No split or bonus falls in that gap.
+
 ---
 
 ## Coming up

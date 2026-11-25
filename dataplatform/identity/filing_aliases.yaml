@@ -1,0 +1,52 @@
+# Filing aliases: a filed ISIN that is not the issuer's equity (M18.1; owner ruling 2026-11-23, D46).
+#
+# A few issuers file their board meetings and announcements under one of their *debenture* ISINs.
+# That is not a reissue (a bond's price history is not the equity's), so it never becomes an
+# `isin_lineage` edge. The filing resolver (`dataplatform.identity.filing_isin`) reads this table
+# and moves such a filing to the issuer's equity, from the equity's first NSE session; a filing
+# knowable before that stays on the filed ISIN.
+#
+# The loader refuses an alias across issuer codes, from an equity ISIN or onto a non-equity one.
+# `uv run python -m dataplatform.identity.link_filing_history` proves each entry from L1 and the
+# master (the equity is the issuer code's only ACTIVE equity and carries the symbol; the bond traded
+# under that symbol; every filing under it names it). Run it, and then `filing_rekey`, after any
+# change here. This is not `aliases.yaml`, which maps news *names* to an ISIN.
+#
+# Fields: filed_isin, isin (the equity), effective_date (the equity's first NSE session in L1),
+# symbol, issuer, provenance, note.
+
+version: 1
+
+aliases:
+  - filed_isin: INE031A07873
+    isin: INE031A01017
+    effective_date: 2017-05-19
+    symbol: HUDCO
+    issuer: Housing & Urban Development Corporation Ltd.
+    provenance: owner ruling 2026-11-23
+    note: >-
+      A debenture of the same issuer code as INE031A01017; NSE printed INE031A07873 as series N6 under HUDCO 2013-06-13 .. 2023-03-01; every L1 filing under it names HUDCO.
+  - filed_isin: INE202E07104
+    isin: INE202E01016
+    effective_date: 2023-11-29
+    symbol: IREDA
+    issuer: Indian Renewable Energy Development Agency Ltd.
+    provenance: owner ruling 2026-11-23
+    note: >-
+      A debenture of the same issuer code as INE202E01016; NSE printed INE202E07104 as series N1 under IREDA 2014-12-12 .. 2024-02-20; every L1 filing under it names IREDA.
+  - filed_isin: INE053F07520
+    isin: INE053F01010
+    effective_date: 2021-01-29
+    symbol: IRFC
+    issuer: Indian Railway Finance Corporation Ltd.
+    provenance: owner ruling 2026-11-23
+    note: >-
+      A debenture of the same issuer code as INE053F01010; NSE printed INE053F07520 as series N1 under IRFC 2012-03-02 .. 2022-02-04; every L1 filing under it names IRFC.
+  - filed_isin: INE976I07138
+    isin: INE976I01016
+    effective_date: 2025-10-13
+    symbol: TATACAP
+    issuer: Tata Capital Ltd.
+    provenance: owner ruling 2026-11-23
+    note: >-
+      A debenture of the same issuer code as INE976I01016; NSE printed INE976I07138 as series N1 under TATACAP 2011-06-24 .. 2012-03-01; every L1 filing under it names TATACAP.
