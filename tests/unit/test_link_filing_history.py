@@ -166,9 +166,17 @@ def test_an_effective_date_off_the_successors_first_session_is_refused() -> None
     assert judge_pre_era(replace(KOTAK, effective_date=date(2010, 9, 13)), KOTAK_FACTS)
 
 
-def test_a_symbol_trading_as_another_isin_at_the_era_start_is_refused() -> None:
+def test_a_symbol_trading_as_another_equity_isin_at_the_era_start_is_refused() -> None:
     facts = replace(KOTAK_FACTS, symbol_isins_at_era_start=(KOTAK_MID, "INE999A01015"))
     assert judge_pre_era(KOTAK, facts)
+    alone = replace(KOTAK_FACTS, symbol_isins_at_era_start=("INE237A01044",))
+    assert judge_pre_era(KOTAK, alone)
+
+
+def test_the_symbols_own_debenture_at_the_era_start_is_no_rival() -> None:
+    """BRITANNIA, 2011-06-22: the equity INE216A01022 and the bonus debenture INE216A07045."""
+    facts = replace(KOTAK_FACTS, symbol_isins_at_era_start=(KOTAK_MID, "INE237A07019"))
+    assert judge_pre_era(KOTAK, facts) == []
 
 
 def test_a_survivor_that_is_not_the_symbol_or_not_active_is_refused() -> None:

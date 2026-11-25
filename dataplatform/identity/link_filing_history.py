@@ -140,7 +140,8 @@ class PreEraFacts:
     old_price_rows: int
     old_in_equity_list: int
     successor_first_nse: date | None
-    #: ISINs the symbol trades as on its first NSE session on or after the ISIN era's start.
+    #: ISINs the symbol trades as on its first NSE session on or after the ISIN era's start, of
+    #: every security type; the judge compares the equity ones.
     symbol_isins_at_era_start: tuple[str, ...]
     #: The chain from the successor to its survivor, successor first.
     chain: tuple[str, ...]
@@ -251,10 +252,12 @@ def judge_pre_era(link: PreEraLink, facts: PreEraFacts) -> list[str]:
             out.append(
                 f"effective {link.effective_date} is not the successor's first session {first}"
             )
-    if facts.symbol_isins_at_era_start != (new,):
+    # Equity ISINs only: the symbol's own debentures trade under it too (BRITANNIA's bonus
+    # debenture INE216A07045 on 2011-06-22), and a bond is no rival claim on the equity's history.
+    equities = tuple(i for i in facts.symbol_isins_at_era_start if _is_equity(i))
+    if equities != (new,):
         out.append(
-            f"{link.symbol} trades as {facts.symbol_isins_at_era_start} at the ISIN era's start, "
-            f"not {new} alone"
+            f"{link.symbol} trades as equity {equities} at the ISIN era's start, not {new} alone"
         )
     if facts.survivor_status != "ACTIVE":
         out.append(f"the chain's survivor {facts.chain[-1:]} is not ACTIVE in the master")
