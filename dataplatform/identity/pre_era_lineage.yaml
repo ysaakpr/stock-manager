@@ -1,0 +1,188 @@
+# Reissues before the NSE ISIN era, linked by hand (M18.1; owner ruling 2026-11-23, HUMAN_DECISIONS D46).
+#
+# NSE's filing feeds (board meetings, announcements, shareholding) and its corporate-action feed
+# state a company's *original* ISIN. When that ISIN was retired before 2011-06-22, the first NSE
+# bhavcopy to print an ISIN, L1 price contiguity cannot derive the edge, so `filing_rekey` left the
+# company's filings on a dead ISIN and the M17 dossiers showed no results date for it.
+#
+# Each entry becomes one MANUAL `isin_lineage` edge, written only by
+#     uv run python -m dataplatform.identity.link_filing_history --apply
+# which re-proves every entry from L0, L1 and the store first and writes nothing unless all pass
+# (the proof is in that module's docstring). Remove an entry rather than weaken the proof.
+#
+# Fields:
+#   symbol          the NSE symbol every L1 filing stated under old_isin names
+#   old_isin        the ISIN the filings state; in no price row, no EQUITY_L capture, not in the master
+#   successor_isin  what the symbol traded as from the reissue; serial = old serial + 1. Where it was
+#                   itself reissued later (an L1 edge already stored), the edge lands on it and the
+#                   chain carries the filing on to the live ISIN.
+#   effective_date  the successor's first NSE session in L1, the lineage's own definition of an
+#                   edge's date. Where a stored pre-era split dates the reissue, it is 4-6 sessions
+#                   after that ex-date (the pre-ISIN resolver's settlement refusal).
+#   provenance      who decided the link and when
+#   note            the evidence summary, per name, as measured on 2026-11-25
+
+version: 1
+
+links:
+  - symbol: APOLLOHOSP
+    old_isin: INE437A01016
+    successor_isin: INE437A01024
+    effective_date: 2010-09-09
+    provenance: owner ruling 2026-11-23
+    note: >-
+      filings under INE437A01016 all name APOLLOHOSP; it never traded with an ISIN, is in no EQUITY_L capture or master row; APOLLOHOSP trades as INE437A01024 from the first ISIN-era session; a stored pre-era face-value split dates the reissue.
+  - symbol: ASTRAL
+    old_isin: INE006I01012
+    successor_isin: INE006I01020
+    effective_date: 2010-09-22
+    provenance: owner ruling 2026-11-23
+    note: >-
+      filings under INE006I01012 all name ASTRAL; it never traded with an ISIN, is in no EQUITY_L capture or master row; ASTRAL trades as INE006I01020 from the first ISIN-era session; INE006I01020 is the retired middle of the stored L1 edge(s) to INE006I01046, registered DELISTED from its L1 EQ bars; a stored pre-era face-value split dates the reissue.
+  - symbol: AUROPHARMA
+    old_isin: INE406A01029
+    successor_isin: INE406A01037
+    effective_date: 2011-02-17
+    provenance: owner ruling 2026-11-23
+    note: >-
+      filings under INE406A01029 all name AUROPHARMA; it never traded with an ISIN, is in no EQUITY_L capture or master row; AUROPHARMA trades as INE406A01037 from the first ISIN-era session; a stored pre-era face-value split dates the reissue.
+  - symbol: BALKRISIND
+    old_isin: INE787D01018
+    successor_isin: INE787D01026
+    effective_date: 2010-12-27
+    provenance: owner ruling 2026-11-23
+    note: >-
+      filings under INE787D01018 all name BALKRISIND; it never traded with an ISIN, is in no EQUITY_L capture or master row; BALKRISIND trades as INE787D01026 from the first ISIN-era session; a stored pre-era face-value split dates the reissue.
+  - symbol: BRITANNIA
+    old_isin: INE216A01014
+    successor_isin: INE216A01022
+    effective_date: 2010-09-16
+    provenance: owner ruling 2026-11-23
+    note: >-
+      filings under INE216A01014 all name BRITANNIA; it never traded with an ISIN, is in no EQUITY_L capture or master row; BRITANNIA trades as INE216A01022 from the first ISIN-era session; INE216A01022 is the retired middle of the stored L1 edge(s) to INE216A01030, registered DELISTED from its L1 EQ bars; a stored pre-era face-value split dates the reissue.
+  - symbol: COROMANDEL
+    old_isin: INE169A01023
+    successor_isin: INE169A01031
+    effective_date: 2010-12-30
+    provenance: owner ruling 2026-11-23
+    note: >-
+      filings under INE169A01023 all name COROMANDEL; it never traded with an ISIN, is in no EQUITY_L capture or master row; COROMANDEL trades as INE169A01031 from the first ISIN-era session; a stored pre-era face-value split dates the reissue.
+  - symbol: EIDPARRY
+    old_isin: INE126A01023
+    successor_isin: INE126A01031
+    effective_date: 2010-12-30
+    provenance: owner ruling 2026-11-23
+    note: >-
+      filings under INE126A01023 all name EIDPARRY; it never traded with an ISIN, is in no EQUITY_L capture or master row; EIDPARRY trades as INE126A01031 from the first ISIN-era session; a stored pre-era face-value split dates the reissue.
+  - symbol: EMAMILTD
+    old_isin: INE548C01024
+    successor_isin: INE548C01032
+    effective_date: 2010-07-28
+    provenance: owner ruling 2026-11-23
+    note: >-
+      filings under INE548C01024 all name EMAMILTD; it never traded with an ISIN, is in no EQUITY_L capture or master row; EMAMILTD trades as INE548C01032 from the first ISIN-era session; a stored pre-era face-value split dates the reissue.
+  - symbol: ENGINERSIN
+    old_isin: INE510A01010
+    successor_isin: INE510A01028
+    effective_date: 2010-05-13
+    provenance: owner ruling 2026-11-23
+    note: >-
+      filings under INE510A01010 all name ENGINERSIN; it never traded with an ISIN, is in no EQUITY_L capture or master row; ENGINERSIN trades as INE510A01028 from the first ISIN-era session; a stored pre-era face-value split dates the reissue.
+  - symbol: HAVELLS
+    old_isin: INE176B01018
+    successor_isin: INE176B01026
+    effective_date: 2006-07-27
+    provenance: owner ruling 2026-11-23
+    note: >-
+      filings under INE176B01018 all name HAVELLS; it never traded with an ISIN, is in no EQUITY_L capture or master row; HAVELLS trades as INE176B01026 from the first ISIN-era session; INE176B01026 is the retired middle of the stored L1 edge(s) to INE176B01034, registered DELISTED from its L1 EQ bars; no stored action dates the reissue: 2006-07-27 is the first session L1 already keys to INE176B01026 (pre-ISIN rows), so the edge only states what L1 holds.
+  - symbol: HINDZINC
+    old_isin: INE267A01017
+    successor_isin: INE267A01025
+    effective_date: 2011-03-14
+    provenance: owner ruling 2026-11-23
+    note: >-
+      filings under INE267A01017 all name HINDZINC; it never traded with an ISIN, is in no EQUITY_L capture or master row; HINDZINC trades as INE267A01025 from the first ISIN-era session; a stored pre-era face-value split dates the reissue.
+  - symbol: KEC
+    old_isin: INE389H01014
+    successor_isin: INE389H01022
+    effective_date: 2011-01-06
+    provenance: owner ruling 2026-11-23
+    note: >-
+      filings under INE389H01014 all name KEC; it never traded with an ISIN, is in no EQUITY_L capture or master row; KEC trades as INE389H01022 from the first ISIN-era session; a stored pre-era face-value split dates the reissue.
+  - symbol: KOTAKBANK
+    old_isin: INE237A01010
+    successor_isin: INE237A01028
+    effective_date: 2010-09-20
+    provenance: owner ruling 2026-11-23
+    note: >-
+      filings under INE237A01010 all name KOTAKBANK; it never traded with an ISIN, is in no EQUITY_L capture or master row; KOTAKBANK trades as INE237A01028 from the first ISIN-era session; INE237A01028 is the retired middle of the stored L1 edge(s) to INE237A01036, registered DELISTED from its L1 EQ bars; a stored pre-era face-value split dates the reissue.
+  - symbol: LICHSGFIN
+    old_isin: INE115A01018
+    successor_isin: INE115A01026
+    effective_date: 2011-01-06
+    provenance: owner ruling 2026-11-23
+    note: >-
+      filings under INE115A01018 all name LICHSGFIN; it never traded with an ISIN, is in no EQUITY_L capture or master row; LICHSGFIN trades as INE115A01026 from the first ISIN-era session; a stored pre-era face-value split dates the reissue.
+  - symbol: LUPIN
+    old_isin: INE326A01029
+    successor_isin: INE326A01037
+    effective_date: 2010-09-03
+    provenance: owner ruling 2026-11-23
+    note: >-
+      filings under INE326A01029 all name LUPIN; it never traded with an ISIN, is in no EQUITY_L capture or master row; LUPIN trades as INE326A01037 from the first ISIN-era session; a stored pre-era face-value split dates the reissue.
+  - symbol: MMTC
+    old_isin: INE123F01011
+    successor_isin: INE123F01029
+    effective_date: 2010-08-05
+    provenance: owner ruling 2026-11-23
+    note: >-
+      filings under INE123F01011 all name MMTC; it never traded with an ISIN, is in no EQUITY_L capture or master row; MMTC trades as INE123F01029 from the first ISIN-era session; a stored pre-era face-value split dates the reissue.
+  - symbol: NATIONALUM
+    old_isin: INE139A01026
+    successor_isin: INE139A01034
+    effective_date: 2011-03-22
+    provenance: owner ruling 2026-11-23
+    note: >-
+      filings under INE139A01026 all name NATIONALUM; it never traded with an ISIN, is in no EQUITY_L capture or master row; NATIONALUM trades as INE139A01034 from the first ISIN-era session; a stored pre-era face-value split dates the reissue.
+  - symbol: ONGC
+    old_isin: INE213A01011
+    successor_isin: INE213A01029
+    effective_date: 2011-02-15
+    provenance: owner ruling 2026-11-23
+    note: >-
+      filings under INE213A01011 all name ONGC; it never traded with an ISIN, is in no EQUITY_L capture or master row; ONGC trades as INE213A01029 from the first ISIN-era session; a stored pre-era face-value split dates the reissue.
+  - symbol: PFOCUS
+    old_isin: INE367G01020
+    successor_isin: INE367G01038
+    effective_date: 2010-11-05
+    provenance: owner ruling 2026-11-23
+    note: >-
+      filings under INE367G01020 all name PFOCUS; it never traded with an ISIN, is in no EQUITY_L capture or master row; PFOCUS trades as INE367G01038 from the first ISIN-era session; a stored pre-era face-value split dates the reissue.
+  - symbol: REDINGTON
+    old_isin: INE891D01018
+    successor_isin: INE891D01026
+    effective_date: 2010-08-27
+    provenance: owner ruling 2026-11-23
+    note: >-
+      filings under INE891D01018 all name REDINGTON; it never traded with an ISIN, is in no EQUITY_L capture or master row; REDINGTON trades as INE891D01026 from the first ISIN-era session; a stored pre-era face-value split dates the reissue.
+  - symbol: SUNPHARMA
+    old_isin: INE044A01028
+    successor_isin: INE044A01036
+    effective_date: 2010-12-02
+    provenance: owner ruling 2026-11-23
+    note: >-
+      filings under INE044A01028 all name SUNPHARMA; it never traded with an ISIN, is in no EQUITY_L capture or master row; SUNPHARMA trades as INE044A01036 from the first ISIN-era session; a stored pre-era face-value split dates the reissue.
+  - symbol: SUPREMEIND
+    old_isin: INE195A01010
+    successor_isin: INE195A01028
+    effective_date: 2010-10-25
+    provenance: owner ruling 2026-11-23
+    note: >-
+      filings under INE195A01010 all name SUPREMEIND; it never traded with an ISIN, is in no EQUITY_L capture or master row; SUPREMEIND trades as INE195A01028 from the first ISIN-era session; a stored pre-era face-value split dates the reissue.
+  - symbol: TVSMOTOR
+    old_isin: INE494B01015
+    successor_isin: INE494B01023
+    effective_date: 2006-01-02
+    provenance: owner ruling 2026-11-23
+    note: >-
+      filings under INE494B01015 all name TVSMOTOR; it never traded with an ISIN, is in no EQUITY_L capture or master row; TVSMOTOR trades as INE494B01023 from the first ISIN-era session; no stored action dates the reissue: 2006-01-02 is the first session L1 already keys to INE494B01023 (pre-ISIN rows), so the edge only states what L1 holds.

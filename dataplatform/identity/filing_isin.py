@@ -24,6 +24,14 @@ edge is explained: recorded by hand, corroborated by a split or bonus, or a hand
 `MAX_EXPLAINED_GAP_SESSIONS` sessions between the two spans. Any other edge stops the walk, and
 the status says why, so the caller counts it rather than guessing. An ISIN with no edge at all
 (a reissue before the NSE ISIN era, or a filing under a debenture ISIN) is left as filed.
+
+**Filing aliases (`filing_aliases.yaml`).** A few issuers file under a *debenture* ISIN: HUDCO's
+board meetings state `INE031A07873`, a bond, not its equity `INE031A01017`. That is not a reissue,
+so it never becomes an `isin_lineage` edge (an edge is a price history; a bond's is not the
+equity's). The curated alias table maps such a filed ISIN to the equity of the *same issuer code*,
+from the equity's first NSE session; a filing knowable before it stays on the filed ISIN, as a
+pre-reissue filing does. The loader refuses an alias across issuers, from an equity ISIN, or onto
+a non-equity one; `identity.link_filing_history` checks each entry against L0, L1 and the master.
 """
 
 from __future__ import annotations
@@ -33,19 +41,25 @@ from collections.abc import Callable, Hashable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import date
 from enum import StrEnum
+from pathlib import Path
 from typing import Final
+
+import yaml
 
 from dataplatform.logging import get_logger
 from dataplatform.store.db import Connection
 
 __all__ = [
+    "FILING_ALIASES_PATH",
     "MAX_EXPLAINED_GAP_SESSIONS",
     "UNMAPPED",
+    "FilingAlias",
     "FilingEdge",
     "FilingIsin",
     "FilingIsinResolver",
     "FilingIsinStatus",
     "RekeyTally",
+    "load_filing_aliases",
     "load_filing_resolver",
     "rekey_rows",
     "unmapped_counts",
@@ -67,6 +81,11 @@ _ISSUER_LEN: Final = 7
 
 _MANUAL: Final = "MANUAL"
 _CORROBORATED: Final = "CORROBORATED"
+#: `FilingEdge.detected_by` of an edge built from a `FilingAlias`, never an `isin_lineage` value.
+_ALIAS: Final = "FILING_ALIAS"
+
+#: The curated filed-ISIN → equity-ISIN table (module docstring), checked in beside `aliases.yaml`.
+FILING_ALIASES_PATH: Final[Path] = Path(__file__).parent / "filing_aliases.yaml"
 
 
 class FilingIsinStatus(StrEnum):
@@ -122,14 +141,47 @@ class FilingIsin:
     hops: int
 
 
+@dataclass(frozen=True, slots=True)
+class FilingAlias:
+    """A filed ISIN that is not the issuer's equity, and the equity filings under it belong to.
+
+    `effective_date` is the equity's first NSE session: a filing knowable before it stays on the
+    filed ISIN. `issuer`, `symbol`, `provenance` and `note` are the audit trail; only the two ISINs
+    and the date take part in resolving.
+    """
+
+    filed_isin: str
+    isin: str
+    effective_date: date
+    symbol: str
+    issuer: str
+    provenance: str
+    note: str
+
+    def __post_init__(self) -> None:
+        if _is_equity(self.filed_isin):
+            raise ValueError(f"filing alias {self.filed_isin}: an equity ISIN is a lineage edge")
+        if not _is_equity(self.isin):
+            raise ValueError(f"filing alias {self.filed_isin} -> {self.isin}: not an equity ISIN")
+        if self.filed_isin[:_ISSUER_LEN] != self.isin[:_ISSUER_LEN]:
+            raise ValueError(
+                f"filing alias {self.filed_isin} -> {self.isin}: different issuer codes"
+            )
+
+
 def _is_equity(isin: str) -> bool:
     return isin.startswith(_EQUITY_PREFIX) and isin[_ISSUER_LEN : _ISSUER_LEN + 2] == _EQUITY_TYPE
 
 
 class FilingIsinResolver:
-    """Walks `isin_lineage` forward for a filing, as of the filing's knowable date (module doc)."""
+    """Walks `isin_lineage` forward for a filing, as of the filing's knowable date (module doc).
 
-    def __init__(self, edges: Iterable[FilingEdge]) -> None:
+    ``aliases`` are the curated filed-ISIN aliases (`FilingAlias`). Each is one more forward hop,
+    walked like an explained edge, but it never counts toward a successor's fan-in: a bond and a
+    retired equity ISIN may both lead to one equity without making it ambiguous.
+    """
+
+    def __init__(self, edges: Iterable[FilingEdge], aliases: Iterable[FilingAlias] = ()) -> None:
         self._forward: dict[str, FilingEdge] = {}
         fan_in: Counter[str] = Counter()
         for edge in edges:
@@ -138,6 +190,14 @@ class FilingIsinResolver:
             self._forward[edge.predecessor_isin] = edge
             fan_in[edge.successor_isin] += 1
         self._fan_in = {isin for isin, n in fan_in.items() if n > 1}
+        self._aliases = 0
+        for alias in aliases:
+            if alias.filed_isin in self._forward:
+                raise ValueError(f"filing alias {alias.filed_isin} also leaves by a lineage edge")
+            self._forward[alias.filed_isin] = FilingEdge(
+                alias.filed_isin, alias.isin, alias.effective_date, _ALIAS, _ALIAS, 0
+            )
+            self._aliases += 1
 
     @classmethod
     def empty(cls) -> FilingIsinResolver:
@@ -147,9 +207,16 @@ class FilingIsinResolver:
     def __len__(self) -> int:
         return len(self._forward)
 
+    @property
+    def aliases(self) -> int:
+        """How many of the forward hops are filing aliases rather than lineage edges."""
+        return self._aliases
+
     def _refusal(self, edge: FilingEdge) -> FilingIsinStatus | None:
         """Why a filing may not follow ``edge``, or None when it may."""
         p, s = edge.predecessor_isin, edge.successor_isin
+        if edge.detected_by == _ALIAS:
+            return None  # same issuer, onto its equity: `FilingAlias` refused anything else
         if not (_is_equity(p) and _is_equity(s)) or p[:_ISSUER_LEN] != s[:_ISSUER_LEN]:
             return FilingIsinStatus.CROSS_ISSUER
         if s in self._fan_in:
@@ -197,17 +264,62 @@ class FilingIsinResolver:
         return FilingIsin(isin=current, as_filed=isin, status=status, hops=hops)
 
 
-def load_filing_resolver(conn: Connection) -> FilingIsinResolver:
-    """Every `isin_lineage` row, read as a `FilingIsinResolver`. Read-only; commits nothing."""
+def load_filing_aliases(path: Path = FILING_ALIASES_PATH) -> tuple[FilingAlias, ...]:
+    """The curated filing aliases in ``path``, validated (`FilingAlias`); fails loud on a bad file.
+
+    What it never does: read the store. Whether an entry is *true* (the bond is the issuer's, the
+    filings name the symbol) is `identity.link_filing_history`'s check, run before an entry lands.
+    """
+    doc = yaml.safe_load(path.read_text(encoding="utf-8"))
+    if not isinstance(doc, dict) or doc.get("version") != 1:
+        raise ValueError(f"{path}: expected a version-1 mapping")
+    entries = doc.get("aliases") or []
+    if not isinstance(entries, list):
+        raise ValueError(f"{path}: 'aliases' must be a list")
+    out: list[FilingAlias] = []
+    for entry in entries:
+        if not isinstance(entry, dict):
+            raise ValueError(f"{path}: every alias is a mapping")
+        effective = entry["effective_date"]
+        if not isinstance(effective, date):
+            raise ValueError(f"{path}: {entry.get('filed_isin')}: effective_date is not a date")
+        out.append(
+            FilingAlias(
+                filed_isin=str(entry["filed_isin"]),
+                isin=str(entry["isin"]),
+                effective_date=effective,
+                symbol=str(entry["symbol"]),
+                issuer=str(entry["issuer"]),
+                provenance=str(entry["provenance"]),
+                note=str(entry.get("note", "")),
+            )
+        )
+    if len({a.filed_isin for a in out}) != len(out):
+        raise ValueError(f"{path}: a filed ISIN is aliased twice")
+    return tuple(out)
+
+
+def load_filing_resolver(
+    conn: Connection, *, aliases: Iterable[FilingAlias] | None = None
+) -> FilingIsinResolver:
+    """Every `isin_lineage` row, plus the filing aliases, as a `FilingIsinResolver`.
+
+    ``aliases`` defaults to the checked-in `filing_aliases.yaml`. Read-only; commits nothing.
+    """
     rows = conn.execute(
         "SELECT predecessor_isin, successor_isin, effective_date, detected_by, confidence, "
         "gap_sessions FROM isin_lineage ORDER BY predecessor_isin"
     ).fetchall()
     resolver = FilingIsinResolver(
-        FilingEdge(str(p), str(s), eff, str(by), str(conf), int(gap))
-        for p, s, eff, by, conf, gap in rows
+        (
+            FilingEdge(str(p), str(s), eff, str(by), str(conf), int(gap))
+            for p, s, eff, by, conf, gap in rows
+        ),
+        load_filing_aliases() if aliases is None else aliases,
     )
-    _LOG.info("filing_isin.loaded", edges=len(resolver))
+    _LOG.info(
+        "filing_isin.loaded", edges=len(resolver) - resolver.aliases, aliases=resolver.aliases
+    )
     return resolver
 
 

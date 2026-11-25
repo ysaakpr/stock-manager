@@ -330,6 +330,36 @@ What stays on the stated ISIN, and is counted in the report's `unmapped` (by rea
 
 A stated ISIN with no lineage edge at all stays as filed (`as_filed`). This covers a reissue before
 the NSE ISIN era (2011-06), which L1 contiguity cannot see, and a filing under a debenture ISIN.
+Both can be linked by hand, with proof (next section).
+
+## Pre-era reissues and bond filers: `link_filing_history` (M18.1, D46)
+
+`filing_rekey` reports a stated ISIN with no edge as `as_filed`, and two shapes stay there for ever
+unless a human links them:
+
+* a reissue before 2011-06-22, which L1 contiguity cannot see (KOTAKBANK files as `INE237A01010`);
+* a filing under the issuer's debenture ISIN (HUDCO files as `INE031A07873`).
+
+The first kind goes in `dataplatform/identity/pre_era_lineage.yaml` and becomes a MANUAL edge. The
+second goes in `dataplatform/identity/filing_aliases.yaml`. It is read by the filing resolver only,
+and it is never an edge. Each entry carries its provenance. To add one:
+
+```bash
+uv run python -m dataplatform.identity.link_filing_history            # dry run: verdict per entry
+uv run python -m dataplatform.identity.link_filing_history --apply    # one transaction
+uv run python -m dataplatform.ingest.filing_rekey --dry-run            # only the new names move
+uv run python -m dataplatform.ingest.filing_rekey
+```
+
+The dry run prints `proved` or `REFUSED: <reasons>` for every entry, the middles it would register
+and the edges it would insert. It exits 1 if any entry is refused, and `--apply` then writes nothing.
+Take a refused name out of the file. Never weaken the proof (the module docstring lists it). A store
+that already holds every edge is a no-op. An alias needs no `--apply`: it takes effect when the next
+capture or `filing_rekey` loads the file, which also means the app must be redeployed for the nightly
+captures to use a new alias.
+
+After a run, `ca_refresh` files the NSE corporate actions stated under the old ISIN against the
+survivor on its next window. That is the normal shape of a reissue's action.
 
 ## Health
 

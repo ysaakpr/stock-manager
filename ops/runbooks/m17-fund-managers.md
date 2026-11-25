@@ -207,6 +207,16 @@ Operations:
   backfill for the same day (a window already in L0 that day costs no request), then let the
   nightly capture re-merge its own payloads.
 
+## Commons fixes mid-window (pre-registration §7)
+
+§7: "A Commons bug fixed mid-window is journaled with the session range it affected. The decisions
+already made stand." Each fix below changed what the managers read, not a `mandate_hash` input. The
+21 hashes were checked identical before and after it.
+
+| Fixed | Fix | Sessions affected | Record |
+|---|---|---|---|
+| 2026-11-25, before that evening's session | Filing history of 27 NIFTY 500 names linked to their live ISIN (23 pre-2011 reissues and 4 bond filers). Their board meetings (results dates), announcements and shareholding reach the dossiers. | S0 2026-11-18 to 2026-11-24: these names had no results date, announcement or shareholding line. | D46, M18.1 |
+
 ## The kill switch
 
 One switch stops every M17 book, dry and live: `<DATA_ROOT>/kill_switch/m17_fund_managers.json`.
