@@ -229,10 +229,10 @@ class _StubConnection:
         def row(source: str) -> tuple[Any, ...]:
             # source, last_success_date, last_success_at, latest_date, pending, fetched, validated,
             # normalized, published, failed, gap, streak, last_failure date/error/retryable,
-            # last FETCHED date/instant
+            # last FETCHED date/instant, streak sessions
             return (
                 source, None, None, SESSION, 0, 0, 0, 0, 0, 2, 0, 2, SESSION, "boom", False, None,
-                None,
+                None, 1,
             )  # fmt: skip
 
         return _Result([row("bse_eod"), row(SCREENER)])
