@@ -204,9 +204,7 @@ def failed_streak_conditions(
                 f"{status.source}: {sessions} consecutive sessions FAILED "
                 f"({status.failure_streak} failed items)"
             )
-            extent = (
-                f"{status.failure_streak} failed items across {sessions} consecutive sessions"
-            )
+            extent = f"{status.failure_streak} failed items across {sessions} consecutive sessions"
         conditions.append(
             AlertCondition(
                 trigger=Trigger.INGEST_FAILED_STREAK,
