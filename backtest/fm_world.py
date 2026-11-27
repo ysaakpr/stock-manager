@@ -981,9 +981,15 @@ def _wire(
     entries: Callable[[], Sequence[Any]] | None = None,
     decision_model: str | None = None,
     journal_out: Path | None = None,
+    past_session: bool = False,
 ) -> M17SessionResult:
     from analyst.fundmanager.digest import DIGEST_DIR
 
+    if past_session and not memory:
+        raise M17JobError(
+            "--past-session moves the managers' deadline and is for a --memory rehearsal only; "
+            "a persisted run keeps the 08:30 IST deadline"
+        )
     if journal_out is not None and not memory:
         raise M17JobError(
             "--journal-out writes a --memory rehearsal's journal; a persisted run has the real one"
@@ -1109,6 +1115,7 @@ def _wire(
         digest_dir=digest_dir,
         entries_reader=reader,
         ledger=ledger,
+        rehearsal_deadline=clock.now() + timedelta(hours=12) if past_session else None,
     )
     if journal_out is not None:
         # The rehearsal's whole in-memory journal, one entry per line, for offline comparison.
@@ -1182,6 +1189,7 @@ def cli_run(
     scratch: Path,
     decision_model: str | None = None,
     journal_out: Path | None = None,
+    past_session: bool = False,
 ) -> M17SessionResult:
     """`backtest.fm_job.main`'s run (see there)."""
     settings = get_settings()
@@ -1201,6 +1209,7 @@ def cli_run(
             stack=stack,
             decision_model=decision_model,
             journal_out=journal_out,
+            past_session=past_session,
         )
 
 

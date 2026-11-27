@@ -172,3 +172,8 @@ def test_the_override_changes_only_the_decision_model_and_only_in_the_copy() -> 
     assert shadow_hashes["FM-SWING-BRK-10L"] != S0_HASHES["FM-SWING-BRK-10L"]
     assert shadow_hashes["CTRL-FM-SWING-BRK-10L"] == S0_HASHES["CTRL-FM-SWING-BRK-10L"]
     test_the_21_books_keep_the_hashes_s0_started_from()
+
+
+def test_the_past_session_deadline_is_refused_on_a_persisted_run() -> None:
+    with pytest.raises(M17JobError, match="--memory rehearsal only"):
+        main(["--dry-run", "--session", "2026-11-26", "--past-session"])
