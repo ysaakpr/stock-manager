@@ -289,21 +289,27 @@ change did not cover, and it should be named in `ops/BACKLOG.md` before the next
 NSE's old results index (filings up to Dec-2024) names a company by its *original* ISIN.
 HDFCBANK's filings sit under `INE040A01018`, but the company trades as `INE040A01034`. The
 campaign's universe is the ISINs that traded in the price window, so it skipped those filings as
-out of universe. `fundamentals_lineage_backfill` is the scheduler job that fetches them for the 91
+out of universe. `fundamentals_lineage_backfill` is the scheduler job that fetches them for the
 NIFTY 500 names listed in `dataplatform/ingest/fundamentals_lineage_backfill.yaml`, and no others.
+The list has two batches. `names` holds the 91 names of 2026-11-06. `second_batch` holds the 26 names
+linked by hand on 2026-11-25 (M18.1, D46; owner go 2026-11-27). Each run day drives its own batch
+only.
 
 * It reads the index entries from the pages already in L0, so it makes no index request.
-* It follows the lineage through explained edges only (`identity.filing_isin`). Each filing is
-  keyed to the ISIN that was live on its filing date.
+* It follows the lineage through explained edges only (`identity.filing_isin`), and through the
+  bond-ID filing aliases of `identity/filing_aliases.yaml` (HUDCO, IREDA, IRFC). Each filing is
+  keyed to the ISIN that was live on its filing date. A bond-ID filing dated before the equity's
+  first session is counted `before_equity` and never fetched.
 * It fetches each XBRL document under both NSE leases at the fetcher's spacing. A `PUBLISHED`
   filing is never fetched again, so a later run resumes.
-* It runs only on the dates in `RUN_DAYS` (Mon 2026-11-09 at 11:00 IST, Wed 2026-11-11 at 10:00). On any
-  other day it logs `lineage_backfill.not_a_run_window` and returns.
+* It runs only on the dates in `RUN_DAYS`: Mon 2026-11-09 at 11:00 IST and Wed 2026-11-11 at 10:00
+  (first batch), then Mon 2026-11-30 and Tue 2026-12-01 at 10:00 (second batch, 1,195 documents
+  sized 2026-11-27). On any other day it logs `lineage_backfill.not_a_run_window` and returns.
 * It starts no filing after 17:45 IST. A run stopped at that deadline is FAILED on
   `/status/jobs` with "stopped at the 17:45 deadline". The next run day resumes it.
 
 ```bash
-# If the 11:00 fire was missed (the scheduler restarted later), on a run day only:
+# If a run day's fire was missed (the scheduler restarted later), on a run day only:
 uv run python -m dataplatform.scheduler run-once fundamentals_lineage_backfill
 curl -s 127.0.0.1:8000/status/jobs | jq '.jobs[] | select(.name == "fundamentals_lineage_backfill")'
 ```

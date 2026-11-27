@@ -59,6 +59,7 @@ __all__ = [
     "FilingIsinResolver",
     "FilingIsinStatus",
     "RekeyTally",
+    "is_equity_isin",
     "load_filing_aliases",
     "load_filing_resolver",
     "rekey_rows",
@@ -171,6 +172,15 @@ class FilingAlias:
 
 def _is_equity(isin: str) -> bool:
     return isin.startswith(_EQUITY_PREFIX) and isin[_ISSUER_LEN : _ISSUER_LEN + 2] == _EQUITY_TYPE
+
+
+def is_equity_isin(isin: str) -> bool:
+    """Whether ``isin`` is an Indian equity share (`INE` + issuer + security type `01`).
+
+    A filing the resolver left on a debenture ISIN (a `FilingAlias` not yet effective on its
+    knowable date) is not this: the equity did not exist yet. Shape only; reads no store.
+    """
+    return _is_equity(isin)
 
 
 class FilingIsinResolver:

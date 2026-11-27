@@ -3,7 +3,8 @@
 # as out of universe. Sized request-free on 2026-11-06 from the stored index pages: 91 names,
 # 7,378 filings, 4,270 distinct XBRL documents (ops/gates/data-lake-status-2026-11-06.md
 # gap 2). Read by dataplatform.ingest.fundamentals_lineage_backfill; a name not listed here is
-# never fetched.
+# never fetched. `names` is the first batch (Mon 9 / Wed 11 Nov 2026); `second_batch`, below, the
+# second (Mon 30 Nov / Tue 1 Dec 2026). A run day drives its own batch and no other.
 # `isin` is the current ISIN; `symbol` is display only (invariant #2). Public repo: no secret.
 
 version: 1
@@ -99,3 +100,38 @@ names:
   - {isin: INE967H01025, symbol: KIMS}
   - {isin: INE987B01026, symbol: NATCOPHARM}
   - {isin: INE999A01023, symbol: KSB}
+
+# Second batch (M18.1 follow-up; owner go 2026-11-27, HUMAN_DECISIONS D46): the 27 NIFTY 500 names
+# linked on 2026-11-25 (PRs #187/#188) had no pre-2025 fundamentals. 23 reach their live ISIN
+# through the MANUAL `isin_lineage` edges of `identity/pre_era_lineage.yaml`; HUDCO, IREDA and IRFC
+# through the bond aliases of `identity/filing_aliases.yaml` (keyed to the equity only from its
+# first NSE session). TATACAP listed 2025-10-13 and the old index names nothing for it, so it is
+# not listed. Sized request-free on 2026-11-27 from the stored index pages: 2,101 entries, 1,491
+# with an XBRL document, 1,195 distinct documents. Driven only on its own run days (`BATCHES`).
+second_batch:
+  - {isin: INE006I01046, symbol: ASTRAL}
+  - {isin: INE031A01017, symbol: HUDCO}
+  - {isin: INE044A01036, symbol: SUNPHARMA}
+  - {isin: INE053F01010, symbol: IRFC}
+  - {isin: INE115A01026, symbol: LICHSGFIN}
+  - {isin: INE123F01029, symbol: MMTC}
+  - {isin: INE126A01031, symbol: EIDPARRY}
+  - {isin: INE139A01034, symbol: NATIONALUM}
+  - {isin: INE169A01031, symbol: COROMANDEL}
+  - {isin: INE176B01034, symbol: HAVELLS}
+  - {isin: INE195A01028, symbol: SUPREMEIND}
+  - {isin: INE202E01016, symbol: IREDA}
+  - {isin: INE213A01029, symbol: ONGC}
+  - {isin: INE216A01030, symbol: BRITANNIA}
+  - {isin: INE237A01036, symbol: KOTAKBANK}
+  - {isin: INE267A01025, symbol: HINDZINC}
+  - {isin: INE326A01037, symbol: LUPIN}
+  - {isin: INE367G01038, symbol: PFOCUS}
+  - {isin: INE389H01022, symbol: KEC}
+  - {isin: INE406A01037, symbol: AUROPHARMA}
+  - {isin: INE437A01024, symbol: APOLLOHOSP}
+  - {isin: INE494B01023, symbol: TVSMOTOR}
+  - {isin: INE510A01028, symbol: ENGINERSIN}
+  - {isin: INE548C01032, symbol: EMAMILTD}
+  - {isin: INE787D01026, symbol: BALKRISIND}
+  - {isin: INE891D01026, symbol: REDINGTON}

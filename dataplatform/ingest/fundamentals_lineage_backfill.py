@@ -18,8 +18,16 @@ under the NSE host leases and the fetcher's polite rate: XBRL into L0, parse, th
 through explained edges only (`FilingIsinResolver`). HDFCBANK's 2018 filings land on
 `INE040A01026` and its 2024 filings on `INE040A01034`, the same keying the forward feed gives.
 
-**What it never does.** Fetch a name outside the list, follow an edge the resolver refuses, request
-an index page, run on any day but `RUN_DAYS`, or start a filing after `DEADLINE` (IST).
+**Batches.** The list has two batches, each driven only on its own run days (`BATCHES`): the 91
+names of 2026-11-06 (Mon 9 / Wed 11 Nov 2026), and the 26 names hand-linked on 2026-11-25 (M18.1,
+HUMAN_DECISIONS D46; Mon 30 Nov / Tue 1 Dec 2026). Those reach their live ISIN through MANUAL
+`isin_lineage` edges or a bond-ID filing alias (`identity/filing_aliases.yaml`). An alias moves a
+filing to the issuer's equity only from the equity's first NSE session; a filing dated before it
+stays on the bond ISIN, is counted `before_equity` and is never fetched.
+
+**What it never does.** Fetch a name outside the day's batch, follow an edge the resolver refuses,
+key a filing to anything but an equity ISIN, request an index page, run on any day but `RUN_DAYS`,
+or start a filing after `DEADLINE` (IST).
 """
 
 from __future__ import annotations
@@ -29,7 +37,7 @@ from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass, field
 from datetime import date, datetime, time
 from pathlib import Path
-from typing import TYPE_CHECKING, Final
+from typing import TYPE_CHECKING, Final, Literal
 
 import yaml
 from pydantic import BaseModel, ConfigDict, Field
@@ -40,6 +48,7 @@ from dataplatform.identity.filing_isin import (
     UNMAPPED,
     FilingIsinResolver,
     FilingIsinStatus,
+    is_equity_isin,
     load_filing_resolver,
 )
 from dataplatform.identity.master import IdentityStore
@@ -70,11 +79,13 @@ if TYPE_CHECKING:  # a runtime import would cycle through the registry
     from dataplatform.scheduler.registry import JobContext
 
 __all__ = [
+    "BATCHES",
     "COMMAND",
     "DEADLINE",
     "NAMES_PATH",
     "OLD_INDEX_BEFORE",
     "RUN_DAYS",
+    "Batch",
     "LineageBackfillError",
     "Selection",
     "load_names",
@@ -92,10 +103,20 @@ COMMAND: Final = "fundamentals_lineage_backfill"
 #: The checked-in list of names this job may fetch for, by current ISIN.
 NAMES_PATH: Final = Path(__file__).with_name("fundamentals_lineage_backfill.yaml")
 
-#: The only days the job fetches (coordinator, 2026-11-06): Monday after the DQ-ISIN deploy, and
-#: Wednesday to resume. Tuesday 2026-11-10 is an NSE holiday and is skipped. On any other day the
-#: job logs and returns without taking a lease.
-RUN_DAYS: Final[frozenset[date]] = frozenset({date(2026, 11, 9), date(2026, 11, 11)})
+#: A section of the names file: `names` (the first batch) or `second_batch`.
+type Batch = Literal["names", "second_batch"]
+
+#: The only days the job fetches, and the batch each drives. First batch (coordinator, 2026-11-06):
+#: Monday after the DQ-ISIN deploy, and Wednesday to resume; Tuesday 2026-11-10 is an NSE holiday.
+#: Second batch (owner go 2026-11-27, D46): Mon 30 Nov, and Tue 1 Dec to resume. On any other day
+#: the job logs and returns without taking a lease.
+BATCHES: Final[Mapping[date, Batch]] = {
+    date(2026, 11, 9): "names",
+    date(2026, 11, 11): "names",
+    date(2026, 11, 30): "second_batch",
+    date(2026, 12, 1): "second_batch",
+}
+RUN_DAYS: Final[frozenset[date]] = frozenset(BATCHES)
 
 #: No filing is started at or after this IST time, so the run is off the NSE hosts by 18:00 —
 #: before `shareholding_poll` (18:05) and long before any L1/L2 write curfew (18:30).
@@ -121,17 +142,23 @@ class _NamesFile(BaseModel):
 
     version: int = Field(ge=1, le=1)
     names: tuple[_Name, ...] = Field(min_length=1)
+    second_batch: tuple[_Name, ...] = ()
 
 
-def load_names(path: Path = NAMES_PATH) -> Mapping[str, str]:
-    """Current ISIN → symbol for every listed name. Raises on a malformed or duplicated entry."""
+def load_names(path: Path = NAMES_PATH, *, batch: Batch = "names") -> Mapping[str, str]:
+    """Current ISIN → symbol for every name in ``batch``.
+
+    Raises on a malformed entry, or on an ISIN listed twice anywhere in the file: a name belongs to
+    exactly one batch, so no run day can drive another day's name.
+    """
     document = _NamesFile.model_validate(yaml.safe_load(path.read_text(encoding="utf-8")))
-    names: dict[str, str] = {}
-    for name in document.names:
-        if name.isin in names:
+    seen: set[str] = set()
+    for name in (*document.names, *document.second_batch):
+        if name.isin in seen:
             raise ValueError(f"{path.name}: {name.isin} is listed twice")
-        names[name.isin] = name.symbol
-    return names
+        seen.add(name.isin)
+    chosen = document.names if batch == "names" else document.second_batch
+    return {name.isin: name.symbol for name in chosen}
 
 
 def stored_index_entries(l0: L0Store) -> tuple[tuple[FilingIndexEntry, ...], int]:
@@ -170,7 +197,8 @@ class Selection:
     refused_outside_list: int
     #: Stale ISINs the lineage walks to a name not on the list.
     outside_isins: frozenset[str]
-    #: Every other skip, by reason (`current_isin`, `after_old_index`, a resolver status).
+    #: Every other skip, by reason (`current_isin`, `after_old_index`, `before_equity`, a resolver
+    #: status).
     skipped: Mapping[str, int] = field(default_factory=dict)
 
     @property
@@ -192,8 +220,11 @@ def select_entries(
     What it does: for each entry filed before ``before``, walks its stated ISIN to ``as_of``
     (today). An entry whose ISIN is still current was in the M10.4 universe and is not this job's.
     One the walk refuses, or that lands on a name not in ``names``, is counted and not driven.
-    The rest are re-keyed to the ISIN live on their own filing date (the PIT key).
-    What it never does: map an ISIN the resolver will not walk, or admit an unlisted name.
+    The rest are re-keyed to the ISIN live on their own filing date (the PIT key). One that would
+    stay on a non-equity ISIN (a bond-ID filing dated before the issuer's equity first traded, when
+    its alias is not yet effective) is counted `before_equity` and not driven.
+    What it never does: map an ISIN the resolver will not walk, admit an unlisted name, or key a
+    filing to a debenture ISIN.
     """
     chosen: list[FilingIndexEntry] = []
     skipped: Counter[str] = Counter()
@@ -217,6 +248,9 @@ def select_entries(
         then = resolver.resolve(entry.isin, entry.filing_date)
         if then.status in UNMAPPED:
             skipped[then.status.value] += 1
+            continue
+        if not is_equity_isin(then.isin):
+            skipped["before_equity"] += 1
             continue
         chosen.append(entry.model_copy(update={"isin": then.isin}))
     return Selection(
@@ -259,7 +293,8 @@ def run_fundamentals_lineage_backfill(
         )
         return None
 
-    names = load_names(names_path)
+    batch = BATCHES[today]
+    names = load_names(names_path, batch=batch)
     calendar = trading_calendar()
     l0 = L0Store(clock=clock, data_root=settings.data_root)
     expected = settings.snapshot_expect_lake_root
@@ -302,6 +337,7 @@ def run_fundamentals_lineage_backfill(
             index_entries=len(entries),
             index_pages_unreadable=unreadable,
             selected=len(selection.entries),
+            batch=batch,
             names_listed=len(names),
             refused_outside_list=selection.refused_outside_list,
             skipped=dict(selection.skipped),

@@ -1291,9 +1291,10 @@ def fundamentals_lineage_backfill(context: JobContext) -> None:
     """DQ-ISIN Phase 2, one-shot: pre-2025 results filings the backfill skipped on a stale ISIN.
 
     What it does: reads the old results index's entries from the pages already in L0, keeps those
-    whose stated ISIN the lineage walks (explained edges only) to one of the 91 checked-in NIFTY
-    500 names, keys each to the ISIN live on its filing date, and fetches its XBRL through the
-    campaign's runner under both NSE leases at the fetcher's polite rate. See
+    whose stated ISIN the lineage walks (explained edges only, or a curated bond-ID filing alias) to
+    one of the day's batch of checked-in NIFTY 500 names (91 names on 9/11 Nov, the 26 linked by
+    M18.1 on 30 Nov/1 Dec), keys each to the ISIN live on its filing date, and fetches its XBRL
+    through the campaign's runner under both NSE leases at the fetcher's polite rate. See
     `fundamentals_lineage_backfill.run_fundamentals_lineage_backfill`.
     What it assumes: the DQ-ISIN lineage resolver is deployed and `isin_lineage` is current.
     What it never does: request an index page, fetch an unlisted name, run on a day outside its
@@ -1307,20 +1308,23 @@ def fundamentals_lineage_backfill(context: JobContext) -> None:
     run_fundamentals_lineage_backfill_job(context)
 
 
-#: One-shot (coordinator, 2026-11-06): 11:00 IST on Mon 2026-11-09 (after the DQ-ISIN deploy) and
-#: 10:00 on Wed 2026-11-11 (resume), skipping Tue 2026-11-10, an NSE holiday. A crontab has no
+#: One-shot, two batches. First (coordinator, 2026-11-06): 11:00 IST on Mon 2026-11-09 (after the
+#: DQ-ISIN deploy) and 10:00 on Wed 2026-11-11 (resume), skipping Tue 2026-11-10, an NSE holiday;
+#: 4,270 documents (sized 2026-11-06). Second (owner go 2026-11-27, D46): 10:00 on Mon 2026-11-30,
+#: and 10:00 on Tue 2026-12-01 to resume; 1,195 documents (sized 2026-11-27). A crontab has no
 #: year field, so the job itself refuses any other date (`RUN_DAYS`): next year's fires are no-ops.
 #: Its own deadline stops starting filings at 17:45; the 15-minute misfire grace plus the 6h45m
 #: budget end by 18:00, before `shareholding_poll` takes www.nseindia.com at 18:05. No daytime
-#: job holds either NSE host. 4,270 documents (sized 2026-11-06) at 2.5 s spacing is ~3 hours.
+#: job holds either NSE host. At 2.5 s spacing 1,000 documents is well under an hour.
 FUNDAMENTALS_LINEAGE_BACKFILL = Job(
     name="fundamentals_lineage_backfill",
-    cron="0 11 9 11 *; 0 10 11 11 *",
+    cron="0 11 9 11 *; 0 10 11 11 *; 0 10 30 11 *; 0 10 1 12 *",
     fn=fundamentals_lineage_backfill,
     timeout=timedelta(hours=6, minutes=45),
     description=(
-        "One-shot DQ-ISIN Phase 2: pre-2025 XBRL filings of 91 NIFTY 500 names indexed under a "
-        "retired ISIN, keyed through the lineage (Mon 9 / Wed 11 Nov 2026 only)"
+        "One-shot DQ-ISIN Phase 2: pre-2025 XBRL filings of NIFTY 500 names indexed under a "
+        "retired or bond ISIN, keyed through the lineage (91 names Mon 9 / Wed 11 Nov 2026; "
+        "26 names Mon 30 Nov / Tue 1 Dec 2026 only)"
     ),
     misfire_grace=timedelta(minutes=15),
     registered_at=datetime(2026, 11, 9, 9, 30, tzinfo=IST),
