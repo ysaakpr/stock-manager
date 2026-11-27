@@ -62,3 +62,50 @@ command without `--decision-model`).
   that the Postgres budget ledger does not see (a `--memory` run keeps its own). On 26 Nov the
   month stood at 1,132 of 3,000 requests (Brave 249, Tavily 541, Firecrawl 435 of 1,000 each);
   six rehearsals add at most about 400.
+
+## 2. Route, schemas and price (checked before any decision run)
+
+**Route.** `gpt-6-1-sol` in `analyst/llm/bedrock_models.yaml`: adapter `openai_chat`,
+`global.openai.gpt-6.1-sol` on bedrock-runtime's OpenAI-compatible Chat Completions
+(`chat_endpoint: runtime_openai`), the Luna pattern. Probed 2026-11-27, 14:00–14:20 IST:
+
+- `global.openai.gpt-6.1-sol` and `us.openai.gpt-6.1-sol` both answer 200 with strict
+  `json_schema`. The Global profile is used: it serves structured output and is the cheaper one.
+- **Grammar limit: no problem.** Sol accepts both live M17 schemas, exactly as the managers send
+  them (`structured_output_schema` of `schemas.research_tool` and `schemas.decision_tool`), as
+  strict `json_schema`, first time, with no change to either schema. Bedrock's "compiled grammar
+  is too large" refusal (Amendment 6 (d)) is a property of the Anthropic structured-output path;
+  it did not appear on this one.
+- `reasoning_effort` takes `low`, `medium`, `high`, `xhigh` and `max`; `none` and `minimal` are
+  400. Sol is mapped to the `decision` call type in `effort.yaml`, so it runs at `high`, the
+  effort Opus decides at.
+- `max_completion_tokens` was accepted up to 400,000 in the probe; the AWS model card gives
+  131,072 output tokens and a 1M context. The route says 128,000 (as Luna).
+- Usage reports `reasoning_tokens` and, unlike Luna, `cache_write_tokens`: Sol writes the prompt
+  cache implicitly (a 1,290-token decision probe wrote 1,288). The adapter booked those as plain
+  input; it now books them as cache writes (1.25× input) and logs reasoning tokens.
+- Fallback: when Bedrock cannot serve Sol, the call is asked of Opus 5.5 on Bedrock, then Opus 5.5
+  on the Claude CLI. A decision model is backed by the decision model.
+
+**Price.** The owner pasted $2.20 / $11.00 / $0.11 / $2.75 per MTok (input / output / cache read /
+cache write) from the Bedrock console on 2026-11-27 without naming the profile. The AWS model card
+(read 2026-11-27) and the AWS Price List API (AmazonBedrockFoundationModels, us-east-1,
+publicationDate 2026-11-23) show these are the **in-region and US CRIS** rates; the **Global CRIS**
+rates are $2.00 / $10.00 / $0.10 / $2.50, 10 % lower, and every request over 272,000 input tokens
+is billed at the long-context rates in full ($4.00 / $15.00 / $0.20 / $5.00 Global). Both are on
+the dated card (`accounting/model_prices.yaml`, schedule `bedrock-claude-5-5-us-east-1`):
+`global.openai.gpt-6.1-sol` at the Global rates, `us.openai.gpt-6.1-sol` at the owner's. Opus 5.5
+Global is $4.00 / $20.00 / $0.20 / $5.00, so Sol is half Opus per token at every bucket.
+
+**Hashes.** The 21 books' `mandate_hash` on this branch equal the `M17_S0` hashes in the live
+journal, 21 of 21 (`mandate_fingerprints(load_roster())` against `decision_journal`, 2026-11-27
+14:05 IST). `tests/unit/test_fm_sol_shadow.py` now pins them. No roster role names Sol.
+
+**Rehearsal-only switches** (`backtest/fm_job.py`), each refused on a persisted run:
+
+- `--decision-model MODEL` sets every manager book's `models.decision` in a copy of the roster in
+  memory. Refused unless `--dry-run --memory`, and never with `--start`.
+- `--journal-out FILE` writes the rehearsal's in-memory journal, one entry a line.
+- `--past-session` moves the managers' deadline to 12 h from now. A past session's real deadline
+  (08:30 IST of the next session) has gone by: the first 26 Nov Sol run (14:10 IST) journaled
+  `MISSED_SESSION` for all four managers before any call, and was discarded.
