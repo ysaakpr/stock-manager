@@ -76,7 +76,7 @@ from analyst.commons.store import CommonsStore, ShortlistStore
 from analyst.fundmanager.books import DelistedNames, LastTraded
 from analyst.fundmanager.controls import BenchmarkUnavailableError, LakeTriBenchmark
 from analyst.fundmanager.job import STREAM_DRY, STREAM_LIVE, StreamJournal
-from analyst.fundmanager.mandate import Roster, load_roster
+from analyst.fundmanager.mandate import ManagerMandate, Roster, load_roster
 from analyst.fundmanager.runtime import ManagerCommons
 from analyst.llm import LLM, StubLLM
 from analyst.monitor.interlock import GreenGate, StatusApiGate
@@ -979,12 +979,33 @@ def _wire(
     scratch: Path | None,
     stack: ExitStack,
     entries: Callable[[], Sequence[Any]] | None = None,
+    decision_model: str | None = None,
+    journal_out: Path | None = None,
+    past_session: bool = False,
 ) -> M17SessionResult:
     from analyst.fundmanager.digest import DIGEST_DIR
 
+    if past_session and not memory:
+        raise M17JobError(
+            "--past-session moves the managers' deadline and is for a --memory rehearsal only; "
+            "a persisted run keeps the 08:30 IST deadline"
+        )
+    if journal_out is not None and not memory:
+        raise M17JobError(
+            "--journal-out writes a --memory rehearsal's journal; a persisted run has the real one"
+        )
     provider = m17_provider(settings, stub=stub_llm, memory=memory)
     _LOG.info("fm_world.provider", provider=provider.value, memory=memory, dry_run=dry_run)
     roster = load_roster()
+    if decision_model is not None:
+        roster = rehearsal_roster(
+            roster, decision_model=decision_model, memory=memory, dry_run=dry_run, start=start
+        )
+        _LOG.warning(
+            "fm_world.rehearsal_decision_model",
+            decision_model=decision_model,
+            note="shadow rehearsal only: --dry-run --memory, nothing persists",
+        )
     data_root = settings.data_root
     listings: ListingCalendar | None
     try:
@@ -1094,7 +1115,14 @@ def _wire(
         digest_dir=digest_dir,
         entries_reader=reader,
         ledger=ledger,
+        rehearsal_deadline=clock.now() + timedelta(hours=12) if past_session else None,
     )
+    if journal_out is not None:
+        # The rehearsal's whole in-memory journal, one entry per line, for offline comparison.
+        journal_out.parent.mkdir(parents=True, exist_ok=True)
+        with journal_out.open("w", encoding="utf-8") as handle:
+            for entry in sink.entries:
+                handle.write(entry.model_dump_json() + "\n")
     if conn is not None:
         conn.commit()
     return result
@@ -1159,6 +1187,9 @@ def cli_run(
     stub_llm: bool,
     no_wait: bool,
     scratch: Path,
+    decision_model: str | None = None,
+    journal_out: Path | None = None,
+    past_session: bool = False,
 ) -> M17SessionResult:
     """`backtest.fm_job.main`'s run (see there)."""
     settings = get_settings()
@@ -1176,4 +1207,40 @@ def cli_run(
             no_wait=no_wait,
             scratch=scratch,
             stack=stack,
+            decision_model=decision_model,
+            journal_out=journal_out,
+            past_session=past_session,
         )
+
+
+def rehearsal_roster(
+    roster: Roster, *, decision_model: str, memory: bool, dry_run: bool, start: date | None
+) -> Roster:
+    """``roster`` with every manager book's ``models.decision`` set to ``decision_model``.
+
+    What it does: the decision-model override of a shadow rehearsal (the 2026-11-27 GPT-6.1 Sol
+    evaluation) — the same managers, prompts, schemas and Commons, another model deciding.
+    What it assumes: ``decision_model`` is routed in `bedrock_models.yaml` (checked here).
+    What it never does: run outside ``--dry-run --memory`` or with ``--start``. A changed model is
+    a changed `mandate_hash` (§7), so a persisted run under it would journal a manager that does
+    not exist; the override is refused there, loudly, before anything is read. ``roster.yaml``
+    and every journaled hash are untouched: the copy lives in this process only.
+    """
+    if not (memory and dry_run) or start is not None:
+        raise M17JobError(
+            "--decision-model is a shadow-rehearsal override: it runs only with --dry-run "
+            "--memory and without --start (nothing persists). A live or persisted manager's "
+            "model is its roster entry, and changing it is a new manager id (§7)."
+        )
+    from analyst.llm.bedrock import load_bedrock_models
+
+    load_bedrock_models().route(decision_model)  # an unmapped model is refused before any call
+    books = tuple(
+        book.model_copy(
+            update={"models": book.models.model_copy(update={"decision": decision_model})}
+        )
+        if isinstance(book, ManagerMandate)
+        else book
+        for book in roster.books
+    )
+    return roster.model_copy(update={"books": books})

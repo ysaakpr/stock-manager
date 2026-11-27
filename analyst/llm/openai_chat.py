@@ -12,8 +12,9 @@ The translation keeps the `LLM` protocol's contract exactly as `BedrockLLM`'s Cl
   with ``strict: true`` against `structured_output_schema` of the tool's schema, and answered as
   one `ToolCall` carrying the parsed object. Not a forced function call: on DeepSeek that took
   20 s and chattered before calling, where the schema-constrained answer took about one second.
-- **Usage** is the provider's: ``prompt_tokens`` less any ``cached_tokens`` is input,
-  ``cached_tokens`` is a cache read, ``completion_tokens`` is output.
+- **Usage** is the provider's: ``prompt_tokens`` less any ``cached_tokens`` and
+  ``cache_write_tokens`` is input, ``cached_tokens`` is a cache read, ``cache_write_tokens`` a
+  cache write, ``completion_tokens`` (reasoning included) is output.
 - **The recorded model** is the Bedrock id asked for (`route.bedrock_id`), the id the price card
   carries, whatever the endpoint reports.
 - **Effort** is sent only when the route says the model accepts one (``effort: true``), as
@@ -220,7 +221,9 @@ class OpenAIChatClient:
             "stop_reason": finish,
             "input_tokens": usage.input_tokens,
             "output_tokens": usage.output_tokens,
+            "reasoning_tokens": _reasoning_tokens(payload),
             "cache_read_tokens": usage.cache_read_tokens,
+            "cache_write_tokens": usage.cache_write_tokens,
             "latency_ms": latency_ms,
         }
         self._check_finish(finish, model=model, ceiling=ceiling, fields=fields)
@@ -415,11 +418,29 @@ def _choice_and_usage(payload: Mapping[str, Any], *, model: str) -> tuple[dict[s
     prompt = _count(raw, "prompt_tokens", model)
     completion = _count(raw, "completion_tokens", model)
     details = raw.get("prompt_tokens_details")
-    cached = 0
-    if isinstance(details, Mapping) and details.get("cached_tokens") is not None:
-        cached = min(_count(details, "cached_tokens", model), prompt)
-    usage = Usage(input_tokens=prompt - cached, output_tokens=completion, cache_read_tokens=cached)
+    cached = written = 0
+    if isinstance(details, Mapping):
+        if details.get("cached_tokens") is not None:
+            cached = min(_count(details, "cached_tokens", model), prompt)
+        # bedrock-runtime reports the prompt-cache write of an OpenAI model (GPT-6.1 Sol writes
+        # implicitly, 1.25x the input rate) inside `prompt_tokens`; it is its own bucket.
+        if details.get("cache_write_tokens") is not None:
+            written = min(_count(details, "cache_write_tokens", model), prompt - cached)
+    usage = Usage(
+        input_tokens=prompt - cached - written,
+        output_tokens=completion,
+        cache_read_tokens=cached,
+        cache_write_tokens=written,
+    )
     return choices[0], usage
+
+
+def _reasoning_tokens(payload: Mapping[str, Any]) -> int | None:
+    """The reasoning part of ``completion_tokens`` (already counted as output); logged only."""
+    raw = payload.get("usage")
+    details = raw.get("completion_tokens_details") if isinstance(raw, Mapping) else None
+    value = details.get("reasoning_tokens") if isinstance(details, Mapping) else None
+    return value if isinstance(value, int) and not isinstance(value, bool) else None
 
 
 def _count(mapping: Mapping[str, Any], key: str, model: str) -> int:

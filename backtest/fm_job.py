@@ -687,8 +687,12 @@ def run_m17_session(
     entries_reader: Callable[[], Sequence[JournalEntry]] | None = None,
     alerter: Alerter | None = None,
     ledger: TokenLedger | None = None,
+    rehearsal_deadline: datetime | None = None,
 ) -> M17SessionResult:
     """Run the M17 desk for ``session`` (module docstring, steps 1-9).
+
+    ``rehearsal_deadline`` replaces the 08:30 IST deadline for a ``--memory`` rehearsal of a past
+    session (whose real deadline has gone by); the caller refuses it on any persisted run.
 
     With a ``ledger``, every manager call also lands in `token_usage` under the book's stream case
     (`ledgered`), priced for the provider that answered it.
@@ -814,7 +818,7 @@ def run_m17_session(
         exits = _stop_exits(desk, session)
         stages.done("stops")
         # 5. wait for the session's data
-        deadline = manager_deadline(world.next_session(session))
+        deadline = rehearsal_deadline or manager_deadline(world.next_session(session))
         gaps = _wait_for_data(
             world, session, journal, clock, book_clock, sleep, wait or WaitPolicy(), deadline
         )
@@ -1888,6 +1892,26 @@ def main(argv: Sequence[str] | None = None) -> int:
     )
     parser.add_argument("--no-wait", action="store_true", help="do not wait for late data")
     parser.add_argument("--scratch", type=Path, default=None)
+    parser.add_argument(
+        "--decision-model",
+        default=None,
+        metavar="MODEL",
+        help="shadow rehearsal: every manager decides on MODEL (a bedrock_models.yaml key); "
+        "refused unless --dry-run --memory, and never with --start",
+    )
+    parser.add_argument(
+        "--past-session",
+        action="store_true",
+        help="with --memory: rehearse a past session, its 08:30 IST deadline moved to 12 h from "
+        "now (the real one has gone by); refused on a persisted run",
+    )
+    parser.add_argument(
+        "--journal-out",
+        type=Path,
+        default=None,
+        metavar="JSONL",
+        help="with --memory: write the rehearsal's in-memory journal here, one entry a line",
+    )
     args = parser.parse_args(argv)
     result = cli_run(
         session=args.session,
@@ -1897,6 +1921,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         stub_llm=args.stub_llm,
         no_wait=args.no_wait,
         scratch=args.scratch or Path(tempfile.mkdtemp(prefix="m17-")),
+        decision_model=args.decision_model,
+        journal_out=args.journal_out,
+        past_session=args.past_session,
     )
     print(
         json.dumps(

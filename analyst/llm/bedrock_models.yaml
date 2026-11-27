@@ -90,3 +90,23 @@ models:
     # Amendment 6 (h): could not serve -> Sonnet 5.5 on Bedrock -> Sonnet 5.5 on the Claude CLI.
     bedrock_fallback_model: claude-sonnet-5-5
     cli_fallback_model: claude-sonnet-5-5
+  gpt-6-1-sol:
+    # GPT-6.1 Sol through its Global cross-region inference profile on bedrock-runtime's
+    # OpenAI-compatible Chat Completions (probed 2026-11-27, ~14:20 IST): `global.` and `us.`
+    # both answer 200 and both accept the M17 research and decision schemas as strict
+    # `json_schema`; the bare `openai.gpt-6.1-sol` is refused for on-demand use there (Mantle
+    # /openai/v1 only). `reasoning_effort` takes low, medium, high, xhigh and max (none and minimal
+    # are 400). The AWS model card gives 131,072 output tokens and a 1M context; 128,000 here, as
+    # Luna. Routed for the decision shadow evaluation of 2026-11-27
+    # (`ops/studies/m17-sol-decision-shadow-eval-2026-11-27.md`): no roster role names it, so it
+    # is capability, not configuration — a manager on it would be a new manager id (§7).
+    adapter: openai_chat
+    bedrock_id: global.openai.gpt-6.1-sol
+    chat_endpoint: runtime_openai
+    max_output_tokens: 128000
+    adaptive_thinking: false
+    effort: true
+    # Could not serve -> Opus 5.5 on Bedrock -> Opus 5.5 on the Claude CLI (a decision model is
+    # backed by the decision model, never by a summary model).
+    bedrock_fallback_model: claude-opus-5-5
+    cli_fallback_model: claude-opus-5-5
