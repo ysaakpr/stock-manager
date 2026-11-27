@@ -1888,6 +1888,20 @@ def main(argv: Sequence[str] | None = None) -> int:
     )
     parser.add_argument("--no-wait", action="store_true", help="do not wait for late data")
     parser.add_argument("--scratch", type=Path, default=None)
+    parser.add_argument(
+        "--decision-model",
+        default=None,
+        metavar="MODEL",
+        help="shadow rehearsal: every manager decides on MODEL (a bedrock_models.yaml key); "
+        "refused unless --dry-run --memory, and never with --start",
+    )
+    parser.add_argument(
+        "--journal-out",
+        type=Path,
+        default=None,
+        metavar="JSONL",
+        help="with --memory: write the rehearsal's in-memory journal here, one entry a line",
+    )
     args = parser.parse_args(argv)
     result = cli_run(
         session=args.session,
@@ -1897,6 +1911,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         stub_llm=args.stub_llm,
         no_wait=args.no_wait,
         scratch=args.scratch or Path(tempfile.mkdtemp(prefix="m17-")),
+        decision_model=args.decision_model,
+        journal_out=args.journal_out,
     )
     print(
         json.dumps(

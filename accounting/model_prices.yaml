@@ -223,6 +223,22 @@ schedules:
          $0.20 input / $1.20 output per 1M tokens; no Global cache rate is published, so its cache
          buckets are carried at the input rate (a cached token is never priced as free). Added
          for Amendment 6 (h) before any call under `global.openai.gpt-5.6-luna`."
+      - "Owner, Bedrock console, pasted 2026-11-27 (chat), OpenAI GPT-6.1 Sol per 1M tokens:
+         $2.20 input / $11.00 output / $0.11 cache read / $2.75 cache write; the profile was not
+         stated. The AWS Bedrock model card
+         (https://docs.aws.amazon.com/bedrock/latest/userguide/model-card-openai-gpt-6-1-sol.html,
+         read 2026-11-27) gives exactly these as the in-region (bedrock-mantle) and US CRIS
+         (`us.openai.gpt-6.1-sol`) short-context Standard rates, and $2.00 / $10.00 / $0.10 /
+         $2.50 for the Global CRIS profile (`global.openai.gpt-6.1-sol`); the AWS Price List API
+         (offer AmazonBedrockFoundationModels, us-east-1, publicationDate 2026-11-23T09:58:41Z,
+         read 2026-11-27) agrees: usage types USE1-MP:USE1_input_tokens_global_standard /
+         _output_tokens_global_standard / _cache_read_tokens_global_standard /
+         _cache_write_tokens_30m_global_standard $2.00 / $10.00 / $0.10 / $2.50, and the
+         `_standard` ones $2.20 / $11.00 / $0.11 / $2.75. Short context only: a request over
+         272,000 input tokens is billed at the long-context rates in full (Global $4.00 / $15.00 /
+         $0.20 / $5.00), which this card cannot express; no M17 call is near that size. Added
+         2026-11-27 for the M17 decision shadow evaluation, before any priced call under either
+         id."
     notes: >-
       DeepSeek V3.2 (`deepseek.v3.2`, Amendment 5's digest model) has no prompt-cache price on
       Bedrock, so its cache buckets carry the full input rate: a cached token Mantle ever reports
@@ -289,6 +305,16 @@ schedules:
         output: "1.20"
         cache_write: "0.20"
         cache_read: "0.20"
+      global.openai.gpt-6.1-sol:
+        input: "2.00"
+        output: "10.00"
+        cache_write: "2.50"
+        cache_read: "0.10"
+      us.openai.gpt-6.1-sol:
+        input: "2.20"
+        output: "11.00"
+        cache_write: "2.75"
+        cache_read: "0.11"
       claude-opus-5-5:
         input: "4.00"
         output: "20.00"
