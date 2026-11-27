@@ -174,8 +174,10 @@ def failed_streak_conditions(
 ) -> list[AlertCondition]:
     """One CRITICAL condition per source whose failure streak has reached `threshold`.
 
-    What it does: reads `SourceStatus.failure_streak` — FAILED dates since the newest date that is
-    neither FAILED nor GAP, the `/status/sources` definition — and compares it with `>=`.
+    What it does: reads `SourceStatus.failure_streak` — FAILED rows dated after the newest date
+    that is neither FAILED nor GAP, the `/status/sources` definition — and compares it with `>=`.
+    For a per-unit source those rows are units (filings), so the title names the sessions they span
+    (`failure_streak_sessions`) and the item count separately; the threshold is unchanged.
     What it assumes: `threshold >= 1`; a threshold of 0 would page about every healthy source.
     What it never does: page below the threshold. A single FAILED session self-heals on the next
     EOD run often enough that paging on it would teach the owner to ignore the channel.
@@ -191,15 +193,26 @@ def failed_streak_conditions(
         last_success = (
             "never" if status.last_success_date is None else status.last_success_date.isoformat()
         )
+        sessions = status.failure_streak_sessions
+        if sessions is None or sessions == status.failure_streak:
+            title = f"{status.source}: {status.failure_streak} consecutive sessions FAILED"
+            extent = f"failed {status.failure_streak} consecutive sessions"
+        else:
+            # A per-unit source (one row per filing): the streak counts failed units, which the
+            # old wording called sessions — 374 failed filings over 11 days read as 374 sessions.
+            title = (
+                f"{status.source}: {sessions} consecutive sessions FAILED "
+                f"({status.failure_streak} failed items)"
+            )
+            extent = f"{status.failure_streak} failed items across {sessions} consecutive sessions"
         conditions.append(
             AlertCondition(
                 trigger=Trigger.INGEST_FAILED_STREAK,
                 dedup_key=f"ingest:{status.source}:failed_streak",
                 severity=Severity.CRITICAL,
-                title=f"{status.source}: {status.failure_streak} consecutive sessions FAILED",
+                title=title,
                 body=(
-                    f"Source {status.source} has failed {status.failure_streak} consecutive "
-                    f"sessions (alert threshold {threshold}).\n"
+                    f"Source {status.source} has {extent} (alert threshold {threshold}).\n"
                     f"Latest failed session: {status.last_failure_date}\n"
                     f"Last success: {last_success}\n"
                     f"Retryable: {retryable}\n"

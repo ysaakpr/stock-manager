@@ -69,7 +69,7 @@ class _Conn:
     def execute(self, _sql: str, _params: object = None) -> _Rows:
         def row(source: str) -> tuple[Any, ...]:
             return (
-                source, None, None, DAY, 0, 343, 0, 0, 0, 0, 0, 0, None, None, None, DAY, AT,
+                source, None, None, DAY, 0, 343, 0, 0, 0, 0, 0, 0, None, None, None, DAY, AT, 0,
             )  # fmt: skip
 
         return _Rows([row(PRESS), row("nse_fii_dii_flows")])

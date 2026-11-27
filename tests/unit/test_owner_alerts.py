@@ -47,6 +47,7 @@ from dataplatform.owner_alerts import (
     drawdown_conditions,
     drawdown_resolution,
     fit,
+    freshness,
     inr,
     kill_switch_conditions,
     kill_switch_resolution,
@@ -524,6 +525,83 @@ def test_stale_data_clears_once_when_it_catches_up() -> None:
         )
     assert [s[1] for s in alerter.sent] == ["Data is late: India VIX", "Data caught up: India VIX"]
     assert "newest: Wed 18 Nov" in alerter.sent[1][2]
+
+
+def _weekdays(start: date, end: date) -> list[date]:
+    days = [start + timedelta(days=i) for i in range((end - start).days + 1)]
+    return [d for d in days if d.weekday() < 5]
+
+
+#: 26 Nov 2026 as the lake stood: newest shareholding filing Thu 19 Nov, poll PUBLISHED daily.
+_SHP_LAKE = [("shareholding", "shareholding patterns", date(2026, 11, 19))]
+_THU_26 = date(2026, 11, 26)
+
+
+def test_shareholding_is_fresh_while_its_daily_poll_succeeds_however_old_the_newest_filing() -> (
+    None
+):
+    """Quarterly filings trickle in after the deadline; a succeeding poll is not late data.
+
+    Fails if shareholding is judged by its newest filing again: 19 Nov is four sessions before
+    Thu 26 Nov (Fri 20, Mon 23, Tue 24, Wed 25), which is what paged on 26 Nov.
+    """
+    (dataset,) = freshness(
+        _SHP_LAKE, _THU_26, _weekdays, {"nse_shareholding_pattern": date(2026, 11, 25)}
+    )
+    assert dataset.polled and dataset.latest == date(2026, 11, 25)
+    assert dataset.sessions_behind == 0
+    assert stale_data_conditions([dataset], max_sessions=2) == []
+
+
+def test_shareholding_goes_stale_when_its_poll_stops_succeeding() -> None:
+    """Fails if the poll date were ignored (or a filing date could stand in for a dead poll)."""
+    (dataset,) = freshness(
+        _SHP_LAKE, _THU_26, _weekdays, {"nse_shareholding_pattern": date(2026, 11, 20)}
+    )
+    (condition,) = stale_data_conditions([dataset], max_sessions=2)
+    assert condition.dedup_key == "owner:stale:shareholding"
+    assert "last succeeded on Fri 20 Nov, 3 trading sessions ago" in condition.body
+    # Never succeeded at all, while old filings sit in the lake: still stale, and said so.
+    (never,) = freshness(_SHP_LAKE, _THU_26, _weekdays, {"nse_shareholding_pattern": None})
+    (condition,) = stale_data_conditions([never], max_sessions=2)
+    assert "has never succeeded" in condition.body
+
+
+def test_a_poll_never_makes_an_empty_dataset_fresh_and_other_datasets_ignore_polls() -> None:
+    empty = [("shareholding", "shareholding patterns", None)]
+    (dataset,) = freshness(empty, _THU_26, _weekdays, {"nse_shareholding_pattern": _THU_26})
+    assert dataset.latest is None and not dataset.polled
+    (condition,) = stale_data_conditions([dataset], max_sessions=2)
+    assert "no shareholding patterns data at all" in condition.body
+    vix = [("india_vix", "India VIX", date(2026, 11, 19))]
+    (late,) = freshness(vix, _THU_26, _weekdays, {"nse_shareholding_pattern": _THU_26})
+    assert not late.polled and late.sessions_behind == 4
+    assert len(stale_data_conditions([late], max_sessions=2)) == 1
+
+
+def test_shareholding_clearing_says_when_it_was_last_checked() -> None:
+    ledger, alerter = MemoryLedger(), RecordingAlerter()
+    (late,) = freshness(
+        _SHP_LAKE, _THU_26, _weekdays, {"nse_shareholding_pattern": date(2026, 11, 19)}
+    )
+    (fresh,) = freshness(
+        _SHP_LAKE, _THU_26, _weekdays, {"nse_shareholding_pattern": date(2026, 11, 25)}
+    )
+    _reconcile(
+        Trigger.OWNER_STALE_DATA, stale_data_conditions([late], max_sessions=2), ledger, alerter
+    )
+    _reconcile(
+        Trigger.OWNER_STALE_DATA,
+        stale_data_conditions([fresh], max_sessions=2),
+        ledger,
+        alerter,
+        stale_resolution({"shareholding": fresh}),
+    )
+    assert [s[1] for s in alerter.sent] == [
+        "Data is late: shareholding patterns",
+        "Data caught up: shareholding patterns",
+    ]
+    assert "last checked: Wed 25 Nov" in alerter.sent[1][2]
 
 
 # ── send once ────────────────────────────────────────────────────────────────────────────────

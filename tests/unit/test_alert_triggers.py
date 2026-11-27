@@ -12,6 +12,7 @@ from __future__ import annotations
 
 from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
+from dataclasses import replace
 from datetime import date, datetime, timedelta
 
 import pytest
@@ -162,6 +163,27 @@ def test_a_longer_streak_is_the_same_condition() -> None:
     three = failed_streak_conditions([_status("nse_bhavcopy", streak=3)], threshold=3)
     four = failed_streak_conditions([_status("nse_bhavcopy", streak=4)], threshold=3)
     assert three[0].dedup_key == four[0].dedup_key
+
+
+def test_a_per_filing_streak_names_its_sessions_not_its_rows_as_sessions() -> None:
+    """374 failed filings over 11 days is an 11-session streak of 374 items, not 374 sessions.
+
+    Fails if the title went back to calling the row count sessions, or if the threshold moved to
+    the (smaller) session count: 11 sessions under a threshold of 12 still pages on 374 items.
+    """
+    filings = replace(
+        _status("nse_xbrl_filing", streak=374, error="HostMismatchError: ..."),
+        failure_streak_sessions=11,
+    )
+    (condition,) = failed_streak_conditions([filings], threshold=12)
+    assert condition.title == "nse_xbrl_filing: 11 consecutive sessions FAILED (374 failed items)"
+    assert "374 consecutive" not in condition.title + condition.body
+    assert "374 failed items across 11 consecutive sessions" in condition.body
+    assert condition.dedup_key == "ingest:nse_xbrl_filing:failed_streak"
+    # A per-session source, where the two counts agree, keeps its wording.
+    session = replace(_status("nse_bhavcopy", streak=3), failure_streak_sessions=3)
+    (plain,) = failed_streak_conditions([session], threshold=3)
+    assert plain.title == "nse_bhavcopy: 3 consecutive sessions FAILED"
 
 
 # ── (b) quality red ──────────────────────────────────────────────────────────────────────────

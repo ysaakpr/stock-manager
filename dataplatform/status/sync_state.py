@@ -561,6 +561,11 @@ class SourceStatus:
     #: only: it is shown as PAUSED rather than red, and changes nothing else — `healthy` keeps its
     #: strict meaning, and `is_green` never treats a paused source as published or set aside.
     paused: Paused | None = None
+    #: The distinct logical dates behind `failure_streak`. For a per-session source the two are
+    #: equal; for a per-unit source (one row per filing) `failure_streak` counts failed *units*,
+    #: so 374 failed filings over 11 days reads as 374 rows but 11 sessions. Wording only — every
+    #: threshold still compares `failure_streak`. None when the reader did not compute it.
+    failure_streak_sessions: int | None = None
 
     @property
     def overdue(self) -> bool:
@@ -648,7 +653,8 @@ _SOURCE_STATUS_SQL: Final[str] = """
         ORDER BY source, logical_date DESC
     ),
     streak AS (
-        SELECT s.source, count(*) AS failure_streak
+        SELECT s.source, count(*) AS failure_streak,
+               count(DISTINCT s.logical_date) AS failure_streak_sessions
         FROM sync_state s
         WHERE s.state = 'FAILED'
           AND s.logical_date > COALESCE((
@@ -662,7 +668,8 @@ _SOURCE_STATUS_SQL: Final[str] = """
            agg.failed, agg.gap,
            COALESCE(streak.failure_streak, 0),
            last_failure.logical_date, last_failure.last_error, last_failure.retryable,
-           agg.last_fetched_date, agg.last_fetched_at
+           agg.last_fetched_date, agg.last_fetched_at,
+           COALESCE(streak.failure_streak_sessions, 0)
     FROM agg
     LEFT JOIN streak       ON streak.source = agg.source
     LEFT JOIN last_failure ON last_failure.source = agg.source
@@ -1123,6 +1130,7 @@ class SyncStateStore:
             },
             max_lag_sessions=budget,
             final_state=SyncState.FETCHED if capture_only else SyncState.PUBLISHED,
+            failure_streak_sessions=int(row[17]),
         )
 
     def _lag_sessions(self, last_success: date | None, as_of: date) -> int | None:

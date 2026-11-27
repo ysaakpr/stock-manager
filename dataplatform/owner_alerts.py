@@ -58,6 +58,7 @@ if TYPE_CHECKING:  # the scheduler imports this module lazily; keep the edge one
 __all__ = [
     "MAX_MESSAGE_CHARS",
     "PAPER_BOOKS",
+    "POLLED_DATASETS",
     "DatasetFreshness",
     "M17Night",
     "Message",
@@ -68,6 +69,7 @@ __all__ = [
     "degraded_message",
     "drawdown_conditions",
     "fit",
+    "freshness",
     "inr",
     "kill_switch_conditions",
     "m17_night_message",
@@ -702,6 +704,9 @@ class DatasetFreshness:
     latest: date | None
     sessions_behind: int | None
     known_note: str | None = None
+    #: True when `latest` is the newest successful *poll* (`POLLED_DATASETS`), not the newest
+    #: filing: the dataset is current when its poll is, however long ago the last filing landed.
+    polled: bool = False
 
 
 #: Gaps the owner already knows about: alerted once, said so.
@@ -709,22 +714,45 @@ KNOWN_GAPS: Final[dict[str, str]] = {
     "tri_midsmall": "This is a known gap (stuck since Thu 1 Oct); nothing for you to do.",
 }
 
+#: Datasets judged by their poll rather than by their newest partition: key → the sync_state
+#: source whose PUBLISHED poll dates say "checked, and current". Shareholding patterns are a
+#: quarterly filing partitioned by *filing* date; once the quarter's deadline (21 days after
+#: quarter-end) has passed, late filers trickle in days apart, so "newest filing more than two
+#: sessions old" fired on a daily poll that was succeeding (26 Nov: newest filing 19 Nov, poll
+#: PUBLISHED every day since). A poll that stops succeeding still goes stale on the same session
+#: budget as every other dataset.
+POLLED_DATASETS: Final[dict[str, str]] = {
+    "shareholding": "nse_shareholding_pattern",
+}
+
 
 def stale_data_conditions(
     datasets: Iterable[DatasetFreshness], *, max_sessions: int
 ) -> list[AlertCondition]:
-    """One WARNING per dataset more than `max_sessions` trading sessions behind (or empty)."""
+    """One WARNING per dataset more than `max_sessions` trading sessions behind (or empty).
+
+    A polled dataset (`DatasetFreshness.polled`) is measured from its last successful poll, so it
+    is stale when the poll stops succeeding, not when filings are merely sparse.
+    """
     conditions = []
     for dataset in datasets:
         behind = dataset.sessions_behind
         if dataset.latest is not None and behind is not None and behind <= max_sessions:
             continue
-        if dataset.latest is None:
+        plural = "s" if behind != 1 else ""
+        if dataset.polled and dataset.latest is None:
+            detail = f"The daily check for new {dataset.name} has never succeeded."
+        elif dataset.latest is None:
             detail = f"There is no {dataset.name} data at all."
+        elif dataset.polled:
+            detail = (
+                f"The daily check for new {dataset.name} last succeeded on "
+                f"{day(dataset.latest)}, {behind} trading session{plural} ago."
+            )
         else:
             detail = (
                 f"The newest {dataset.name} is from {day(dataset.latest)}, "
-                f"{behind} trading session{'s' if behind != 1 else ''} behind."
+                f"{behind} trading session{plural} behind."
             )
         note = dataset.known_note or (
             "Books that use it may skip a session or run with a gap. Nothing for you to do; "
@@ -746,8 +774,11 @@ def stale_resolution(datasets: Mapping[str, DatasetFreshness]) -> ResolutionForm
     def word(key: str, title: str, at: datetime) -> tuple[Severity, str, str]:
         dataset = datasets.get(key.removeprefix(f"{_KEY}stale:"))
         name = title.removeprefix("Data is late: ") if dataset is None else dataset.name
+        label = "last checked" if dataset is not None and dataset.polled else "newest"
         latest = (
-            "" if dataset is None or dataset.latest is None else f" (newest: {day(dataset.latest)})"
+            ""
+            if dataset is None or dataset.latest is None
+            else f" ({label}: {day(dataset.latest)})"
         )
         return (
             Severity.INFO,
@@ -1419,19 +1450,56 @@ def sessions_behind(
     return len(sessions(start, end))
 
 
-def read_freshness(data_root: Path, today: date) -> list[DatasetFreshness]:
+def freshness(
+    lake: Iterable[tuple[str, str, date | None]],
+    today: date,
+    sessions: Callable[[date, date], Sequence[date]],
+    last_polls: Mapping[str, date | None],
+) -> list[DatasetFreshness]:
+    """Each lake dataset's freshness; a `POLLED_DATASETS` one measured from its last good poll.
+
+    What it does: for an ordinary dataset, `latest` is its newest partition. For a polled one that
+    holds any data at all, `latest` is the newest PUBLISHED poll date in `last_polls` (None when
+    the poll has never succeeded) — the filing dates say when companies filed, the poll says
+    whether we are still looking.
+    What it never does: call a polled dataset fresh on the strength of its filings alone, or call
+    an empty one fresh on the strength of its poll: with no partition there is no data to be
+    current, and it stays "no data at all".
+    """
+    out = []
+    for key, name, newest in lake:
+        poll_source = POLLED_DATASETS.get(key)
+        polled = poll_source is not None and newest is not None
+        latest = last_polls.get(poll_source) if polled and poll_source is not None else newest
+        behind = None if latest is None else sessions_behind(latest, today, sessions)
+        out.append(DatasetFreshness(key, name, latest, behind, KNOWN_GAPS.get(key), polled))
+    return out
+
+
+def read_last_polls(conn: Connection) -> dict[str, date | None]:
+    """The newest PUBLISHED logical date of each `POLLED_DATASETS` source (None if never)."""
+    sources = sorted(set(POLLED_DATASETS.values()))
+    rows = conn.execute(
+        "SELECT source, max(logical_date) FROM sync_state "
+        "WHERE source = ANY(%s) AND unit = '' AND state = 'PUBLISHED' GROUP BY source",
+        (sources,),
+    ).fetchall()
+    found = {str(row[0]): row[1] for row in rows}
+    return {source: found.get(source) for source in sources}
+
+
+def read_freshness(
+    data_root: Path, today: date, last_polls: Mapping[str, date | None]
+) -> list[DatasetFreshness]:
     from dataplatform.ingest.calendar import trading_calendar
 
     calendar = trading_calendar()
-    out = []
-    for key, name, latest in lake_freshness(data_root):
-        behind = (
-            None
-            if latest is None
-            else sessions_behind(latest, today, lambda a, b: list(calendar.expected_sessions(a, b)))
-        )
-        out.append(DatasetFreshness(key, name, latest, behind, KNOWN_GAPS.get(key)))
-    return out
+    return freshness(
+        lake_freshness(data_root),
+        today,
+        lambda a, b: list(calendar.expected_sessions(a, b)),
+        last_polls,
+    )
 
 
 # ── the jobs ─────────────────────────────────────────────────────────────────────────────────
@@ -1498,7 +1566,7 @@ def run_owner_alerts(
         )
 
     def stale() -> list[AlertCondition]:
-        for dataset in read_freshness(data_root, clock.today()):
+        for dataset in read_freshness(data_root, clock.today(), read_last_polls(conn)):
             datasets[dataset.key] = dataset
         return stale_data_conditions(
             datasets.values(), max_sessions=settings.owner_alert_stale_sessions
