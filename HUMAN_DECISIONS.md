@@ -1271,6 +1271,17 @@ survivor (`filed_against_isin` = the old ISIN), as it already does for 290 reiss
 names had only BSE's rows, and BSE is blocked since 2026-09-24, so their dividends since then were
 missing. No split or bonus falls in that gap.
 
+**2026-11-27 — owner go: "download old".** None of the 27 had fundamentals before 2025. The old
+results index pages already in L0 name 2,101 pre-2025 filings for 26 of them (TATACAP listed
+2025-10-13 and has none). This is a one-shot fetch through the existing job, `fundamentals_lineage_backfill`:
+a second batch in `fundamentals_lineage_backfill.yaml` with the 26 live ISINs, driven only on
+Mon 2026-11-30 at 10:00 IST and Tue 2026-12-01 at 10:00 (resume), on the same leases, polite rate
+and 17:45 deadline. The filing resolver walks the 23 MANUAL edges and the 3 bond aliases; a bond-ID
+filing dated before its equity's first session is skipped (`before_equity`), never fetched (none is,
+in the stored index). Sized request-free from L0: 2,101 entries, 610 with no XBRL document,
+1,491 filings over 1,195 distinct documents. Part (b), the shareholding master's other IDs for four
+of the names, stays open.
+
 ---
 
 ## Coming up

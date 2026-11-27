@@ -672,8 +672,9 @@ def test_installing_the_scheduler_retires_the_single_job_timer() -> None:
 
 
 def test_the_lineage_backfill_fires_only_on_its_run_days_and_clears_the_nse_leases() -> None:
-    """DQ-ISIN Phase 2: Mon 9 Nov 2026 at 11:00 and Wed 11 Nov at 10:00, never the Tuesday
-    holiday, and off both NSE hosts before `shareholding_poll` takes one at 18:05."""
+    """DQ-ISIN Phase 2: Mon 9 Nov 2026 at 11:00 and Wed 11 Nov at 10:00 (never the Tuesday
+    holiday), then the M18.1 batch on Mon 30 Nov and Tue 1 Dec at 10:00; each off both NSE hosts
+    before `shareholding_poll` takes one at 18:05, and clear of every other NSE lease holder."""
     from dataplatform.ingest.fundamentals_lineage_backfill import RUN_DAYS
 
     trigger = FUNDAMENTALS_LINEAGE_BACKFILL.trigger(IST)
@@ -684,23 +685,42 @@ def test_the_lineage_backfill_fires_only_on_its_run_days_and_clears_the_nse_leas
         fires.append(fire)
         previous, cursor = fire, fire + timedelta(seconds=1)
     assert [f.date() for f in fires] == sorted(RUN_DAYS)
-    assert [f.time() for f in fires] == [time(11, 0), time(10, 0)]
+    assert [f.time() for f in fires] == [time(11, 0), time(10, 0), time(10, 0), time(10, 0)]
     assert date(2026, 11, 10) not in RUN_DAYS
     for fire in fires:
         latest_end = fire + FUNDAMENTALS_LINEAGE_BACKFILL.latest_start
         latest_end += FUNDAMENTALS_LINEAGE_BACKFILL.timeout
         assert latest_end.time() <= time(18, 0)
-    # Its two fires against every other NSE lease holder's fire + budget over that week.
+    # Its fires against every other NSE lease holder's fire + budget over each batch's week.
     holders = _nse_lease_holders(default_registry())
     assert FUNDAMENTALS_LINEAGE_BACKFILL in holders
-    week = (datetime(2026, 11, 8, tzinfo=IST), datetime(2026, 11, 12, tzinfo=IST))
-    mine = _worst_case(FUNDAMENTALS_LINEAGE_BACKFILL, *week)
-    assert len(mine) == 2
-    for other in holders:
-        if other is FUNDAMENTALS_LINEAGE_BACKFILL:
-            continue
-        for theirs_start, theirs_end in _windows(other, week[0] - timedelta(days=1), week[1]):
-            for my_start, my_end in mine:
-                assert my_end <= theirs_start or theirs_end <= my_start, (
-                    f"{my_start:%a %H:%M} overlaps {other.name} {theirs_start:%a %H:%M}"
-                )
+    weeks = (
+        (datetime(2026, 11, 8, tzinfo=IST), datetime(2026, 11, 12, tzinfo=IST)),
+        (datetime(2026, 11, 29, tzinfo=IST), datetime(2026, 12, 2, tzinfo=IST)),
+    )
+    for week in weeks:
+        mine = _worst_case(FUNDAMENTALS_LINEAGE_BACKFILL, *week)
+        assert len(mine) == 2
+        for other in holders:
+            if other is FUNDAMENTALS_LINEAGE_BACKFILL:
+                continue
+            for theirs_start, theirs_end in _windows(other, week[0] - timedelta(days=1), week[1]):
+                for my_start, my_end in mine:
+                    assert my_end <= theirs_start or theirs_end <= my_start, (
+                        f"{my_start:%a %H:%M} overlaps {other.name} {theirs_start:%a %H:%M}"
+                    )
+
+
+def test_the_lineage_backfill_fires_next_year_are_refused_by_the_job() -> None:
+    """A crontab has no year: every 2027 fire is on a date outside `RUN_DAYS`, so it is a no-op."""
+    from dataplatform.ingest.fundamentals_lineage_backfill import RUN_DAYS
+
+    trigger = FUNDAMENTALS_LINEAGE_BACKFILL.trigger(IST)
+    fires: list[datetime] = []
+    previous: datetime | None = None
+    cursor = datetime(2027, 1, 1, tzinfo=IST)
+    while (fire := trigger.get_next_fire_time(previous, cursor)) is not None and fire.year == 2027:
+        fires.append(fire)
+        previous, cursor = fire, fire + timedelta(seconds=1)
+    assert len(fires) == 4
+    assert not {f.date() for f in fires} & RUN_DAYS
