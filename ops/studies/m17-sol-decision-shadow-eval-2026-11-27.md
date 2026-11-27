@@ -9,7 +9,7 @@ All times IST.
 
 ## 1. Pre-registered pass criteria
 
-Written and committed at about 15:05 IST on 2026-11-27, **before the first Sol decision run**.
+Written and committed at about 14:10 IST on 2026-11-27, **before the first Sol decision run**.
 Nothing below is changed after a run; anything learned later goes in §5 and later sections as a
 deviation.
 
